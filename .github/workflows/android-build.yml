@@ -1,0 +1,84 @@
+name: Android CI Build
+
+# Jab bhi main/master pe push ho, PR bane, ya "Run workflow" button se manually chalaya jaye
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: {}
+
+jobs:
+  build-debug-apk:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Project ka koi Gradle Wrapper (gradlew) nahi hai isliye Gradle
+      # directly is action se install/run karwa rahe hain — sahi Gradle
+      # version explicitly bata rahe hain (AGP 9.1.1 ko Gradle 9.3.1+ chahiye)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.3.1'
+
+      # Debug build ke liye debug.keystore chahiye (build.gradle.kts isko
+      # rootDir mein dhoondta hai). Yeh file .gitignore mein hai isliye
+      # repo mein nahi hai — CI mein standard Android debug keystore
+      # generate kar rahe hain (well-known default alias/passwords).
+      - name: Generate debug keystore
+        run: |
+          keytool -genkey -v \
+            -keystore debug.keystore \
+            -storepass android -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      # Ensure required Android SDK platform/build-tools are present
+      # (project uses compileSdk 36.1 / targetSdk 36).
+      - name: Install required Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      # GEMINI_API_KEY / YOUTUBE_API_KEY: agar GitHub repo secrets set hain to
+      # .env bana denge, warna Secrets Gradle Plugin apne aap .env.example
+      # (placeholder) use kar lega, build fail nahi hogi.
+      - name: Write .env from repository secrets (optional)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          rm -f .env
+          if [ -n "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY=$GEMINI_API_KEY" >> .env
+          fi
+          if [ -n "$YOUTUBE_API_KEY" ]; then
+            echo "YOUTUBE_API_KEY=$YOUTUBE_API_KEY" >> .env
+          fi
+          if [ -f .env ]; then
+            echo "Wrote .env from repository secrets."
+          else
+            echo "No secrets set, falling back to .env.example placeholders."
+          fi
+
+      - name: Build debug APK
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: harmonix-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
