@@ -90,9 +90,9 @@ roborazzi-compose = { group = "io.github.takahirom.roborazzi", name = "roborazzi
 roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "roborazzi-junit-rule", version.ref = "roborazzi" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
 firebase-ai = { group = "com.google.firebase", name = "firebase-ai" }
-firebase-database = { group = "com.google.firebase", name = "firebase-database-ktx" }
-firebase-auth = { group = "com.google.firebase", name = "firebase-auth-ktx" }
-firebase-appcheck-recaptcha = { group = "com.google.firebase", name = "firebase-appcheck-recaptcha" }
+firebase-database = { group = "com.google.firebase", name = "firebase-database" }
+firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
+firebase-appcheck-recaptcha = { group = "com.google.firebase", name = "firebase-appcheck-recaptcha", version.ref = "firebaseBom" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
