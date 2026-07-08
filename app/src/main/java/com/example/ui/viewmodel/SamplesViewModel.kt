@@ -41,11 +41,6 @@ class SamplesViewModel(
             repository.getSamplesFeed("trending hit").collectLatest { tracks ->
                 _samples.value = tracks
                 _isLoading.value = false
-
-                // Play first sample automatically
-                if (tracks.isNotEmpty()) {
-                    playSampleAtIndex(0)
-                }
             }
         }
     }
@@ -53,17 +48,7 @@ class SamplesViewModel(
     fun onSwipe(newIndex: Int) {
         if (newIndex in _samples.value.indices) {
             _currentIndex.value = newIndex
-            playSampleAtIndex(newIndex)
         }
-    }
-
-    private fun playSampleAtIndex(index: Int) {
-        val tracksList = _samples.value
-        if (tracksList.isEmpty() || index !in tracksList.indices) return
-
-        val currentTrack = tracksList[index]
-        val nextTrack = if (index + 1 in tracksList.indices) tracksList[index + 1] else null
-        playerManager.playTrack(currentTrack, nextTrack)
     }
 
     fun toggleFavorite(track: Track) {
@@ -104,7 +89,7 @@ class SamplesViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        playerManager.stop()
+        playerManager.pause()
     }
 
     class Factory(
