@@ -1,511 +1,258 @@
-package com.example.ui.screens
+package com.example
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
-import com.example.data.model.Track
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import com.example.di.AppContainer
+import com.example.player.YouTubePlayerHost
+import com.example.ui.screens.AuthScreen
+import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.JamScreen
+import com.example.ui.screens.LibraryScreen
+import com.example.ui.screens.SamplesScreen
+import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.viewmodel.AuthViewModel
+import com.example.ui.viewmodel.JamViewModel
 import com.example.ui.viewmodel.MusicViewModel
+import com.example.ui.viewmodel.SamplesViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
+class MainActivity : ComponentActivity() {
+
+    // Initialize di container locally
+    private val appContainer by lazy { AppContainer(applicationContext) }
+
+    // Setup all ViewModels cleanly with factories
+    private val authViewModel: AuthViewModel by viewModels()
+
+    private val musicViewModel: MusicViewModel by viewModels {
+        MusicViewModel.Factory(appContainer.musicRepository, appContainer.musicPlayer)
+    }
+
+    private val samplesViewModel: SamplesViewModel by viewModels {
+        SamplesViewModel.Factory(appContainer.musicRepository, appContainer.samplesPlayerManager, appContainer.musicPlayer)
+    }
+
+    private val jamViewModel: JamViewModel by viewModels {
+        JamViewModel.Factory(appContainer.jamManager, appContainer.jamChatManager, appContainer.musicPlayer)
+    }
+
+    // No-op either way: if denied, the foreground service/playback still runs,
+    // it just won't be able to show the media notification or lock-screen
+    // controls (required as a runtime permission on Android 13+/API 33+).
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        setContent {
+            MyApplicationTheme {
+                val isLoggedIn by authViewModel.isLoggedIn.collectAsState()
+                
+                if (!isLoggedIn) {
+                    AuthScreen(authViewModel = authViewModel)
+                } else {
+                    MainAppLayout(
+                        musicViewModel = musicViewModel,
+                        authViewModel = authViewModel,
+                        samplesViewModel = samplesViewModel,
+                        jamViewModel = jamViewModel
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Do NOT pause musicPlayer here: it's backed by a Media3 foreground
+        // service (PlaybackService) specifically so iTunes-sourced playback
+        // keeps running after this Activity is destroyed (backgrounded,
+        // rotated, or swiped from Recents). Pausing it here was killing
+        // background playback - PlaybackService.onTaskRemoved() stops itself
+        // once nothing is playing, so this call was tearing down the service
+        // right as the app was backgrounded.
+        // The Samples feed is foreground-only content (its ExoPlayer instances
+        // live in Compose, not a service), so it's correct to pause that one.
+        appContainer.samplesPlayerManager.pause()
+    }
+}
+
 @Composable
-fun HomeScreen(
+fun MainAppLayout(
     musicViewModel: MusicViewModel,
     authViewModel: AuthViewModel,
-    modifier: Modifier = Modifier
+    samplesViewModel: SamplesViewModel,
+    jamViewModel: JamViewModel
 ) {
-    val username by authViewModel.username.collectAsState()
-    val searchQuery by musicViewModel.searchQuery.collectAsState()
-    val searchResults by musicViewModel.searchResults.collectAsState()
-    val isSearching by musicViewModel.isSearching.collectAsState()
-    val searchError by musicViewModel.searchError.collectAsState()
-    val homeTracks by musicViewModel.homeTracks.collectAsState()
+    val selectedTab by musicViewModel.selectedTab.collectAsState()
 
-    val currentTrack by musicViewModel.player.currentTrack.collectAsState()
-    val isPlaying by musicViewModel.player.isPlaying.collectAsState()
-    val playbackPos by musicViewModel.player.playbackPosition.collectAsState()
-    val duration by musicViewModel.player.duration.collectAsState()
-    val isBuffering by musicViewModel.player.isBuffering.collectAsState()
+    // playbackError was already being set internally by MusicPlayer whenever
+    // auto-skip gives up after repeated failures, but nothing ever displayed
+    // it - so a failure just looked like silent, endless skipping with no
+    // explanation. Surfacing it here (once, at the app root) fixes that for
+    // every screen, not just Now Playing.
+    val snackbarHostState = remember { SnackbarHostState() }
+    val playbackError by musicViewModel.player.playbackError.collectAsState()
+    LaunchedEffect(playbackError) {
+        val message = playbackError ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        musicViewModel.player.clearPlaybackError()
+    }
 
-    var showPlayerDetail by remember { mutableStateOf(false) }
-    var selectedCategory by remember { mutableStateOf("Chill") }
+    Scaffold(
+        snackbarHost = {
+            SnackbarHost(hostState = snackbarHostState) { data ->
+                Snackbar(snackbarData = data, containerColor = MaterialTheme.colorScheme.errorContainer)
+            }
+        },
+        bottomBar = {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 8.dp
+            ) {
+                NavigationBarItem(
+                    selected = selectedTab == "home",
+                    onClick = { 
+                        musicViewModel.selectTab("home")
+                        samplesViewModel.playerManager.pause() // Pause sample player when switching tabs
+                    },
+                    icon = { Icon(Icons.Default.Home, contentDescription = "Home tab", modifier = Modifier.size(24.dp)) },
+                    label = { Text("Home", style = MaterialTheme.typography.labelMedium) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color.Black,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        indicatorColor = MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = Color.Gray,
+                        unselectedTextColor = Color.Gray
+                    )
+                )
 
-    val categories = listOf("Chill", "Pop", "Lo-Fi", "Electronic", "Alternative")
+                NavigationBarItem(
+                    selected = selectedTab == "samples",
+                    onClick = { 
+                        musicViewModel.selectTab("samples")
+                        musicViewModel.player.pause() // Pause main player when viewing samples feed
+                    },
+                    icon = { Icon(Icons.Default.MusicNote, contentDescription = "Samples tab", modifier = Modifier.size(24.dp)) },
+                    label = { Text("Samples", style = MaterialTheme.typography.labelMedium) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color.Black,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        indicatorColor = MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = Color.Gray,
+                        unselectedTextColor = Color.Gray
+                    )
+                )
 
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        Column(
+                NavigationBarItem(
+                    selected = selectedTab == "jam",
+                    onClick = { 
+                        musicViewModel.selectTab("jam")
+                        samplesViewModel.playerManager.pause()
+                    },
+                    icon = { Icon(Icons.Default.Group, contentDescription = "Jam tab", modifier = Modifier.size(24.dp)) },
+                    label = { Text("Jam Room", style = MaterialTheme.typography.labelMedium) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color.Black,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        indicatorColor = MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = Color.Gray,
+                        unselectedTextColor = Color.Gray
+                    )
+                )
+
+                NavigationBarItem(
+                    selected = selectedTab == "library",
+                    onClick = { 
+                        musicViewModel.selectTab("library")
+                        samplesViewModel.playerManager.pause()
+                    },
+                    icon = { Icon(Icons.Default.LibraryMusic, contentDescription = "Library tab", modifier = Modifier.size(24.dp)) },
+                    label = { Text("Library", style = MaterialTheme.typography.labelMedium) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color.Black,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        indicatorColor = MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = Color.Gray,
+                        unselectedTextColor = Color.Gray
+                    )
+                )
+            }
+        },
+        modifier = Modifier.fillMaxSize()
+    ) { innerPadding ->
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(bottom = if (currentTrack != null) 72.dp else 0.dp)
+                .padding(innerPadding)
         ) {
-            // Header
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 24.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "Good Evening,",
-                        color = Color.Gray,
-                        fontSize = 14.sp
-                    )
-                    Text(
-                        text = username,
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+            when (selectedTab) {
+                "home" -> HomeScreen(musicViewModel = musicViewModel, authViewModel = authViewModel)
+                "samples" -> SamplesScreen(samplesViewModel = samplesViewModel)
+                "jam" -> JamScreen(jamViewModel = jamViewModel, authViewModel = authViewModel)
+                "library" -> LibraryScreen(musicViewModel = musicViewModel, authViewModel = authViewModel)
             }
 
-            // Search input
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = {
-                    musicViewModel.search(it)
-                },
-                placeholder = { Text("Search songs, artists...", color = Color.Gray) },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "Search icon",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { musicViewModel.search("") }) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Clear search",
-                                tint = Color.Gray
-                            )
-                        }
-                    }
-                },
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = Color.DarkGray,
-                    focusedContainerColor = MaterialTheme.colorScheme.surface,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface
-                ),
-                singleLine = true,
+            // NOTE: originally kept visibly small here whenever a YouTube full-song
+            // was playing, because YouTube's Terms of Service require the official
+            // IFrame player to stay visible (it can't be hidden/disguised) when used
+            // this way. Hidden below at the user's explicit request, with that ToS
+            // risk understood - YouTube could revoke API access for this app if this
+            // is flagged, which would break YouTube-sourced playback entirely.
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .testTag("search_input")
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            if (searchQuery.isEmpty()) {
-                // Categories
-                LazyRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(categories) { category ->
-                        val isSelected = category == selectedCategory
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(
-                                    if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
-                                )
-                                .clickable {
-                                    selectedCategory = category
-                                    val term = when (category) {
-                                        "Lo-Fi" -> "lofi chill"
-                                        "Electronic" -> "synthwave"
-                                        else -> category.lowercase()
-                                    }
-                                    musicViewModel.fetchHomeRecommendations()
-                                }
-                                .padding(horizontal = 20.dp, vertical = 10.dp)
-                        ) {
-                            Text(
-                                text = category,
-                                color = if (isSelected) Color.Black else Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Recommended tracks
-                Text(
-                    text = "Recommended for You",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 20.dp)
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                if (isSearching) {
-                    Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .padding(horizontal = 20.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(homeTracks) { track ->
-                            TrackRow(
-                                track = track,
-                                onPlayClick = { musicViewModel.playTrack(track, homeTracks) },
-                                onFavoriteClick = { musicViewModel.toggleFavorite(track) },
-                                onDownloadClick = { musicViewModel.toggleDownload(track) }
-                            )
-                        }
-                    }
-                }
-            } else {
-                // Search Results
-                Text(
-                    text = "Search Results",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 20.dp)
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                if (isSearching) {
-                    Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                    }
-                } else if (searchResults.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .padding(24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = searchError ?: "No results found for \"$searchQuery\"",
-                            color = if (searchError != null) MaterialTheme.colorScheme.error else Color.Gray,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .padding(horizontal = 20.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(searchResults) { track ->
-                            TrackRow(
-                                track = track,
-                                // Queue just this one song (not the whole search
-                                // results list) - otherwise "next" just walks
-                                // down the search results in relevance order
-                                // (mixed genres/artists, sometimes the same song
-                                // re-uploaded twice) instead of picking a genre
-                                // match. See MusicPlayer.triggerAutoplay / 
-                                // MusicRepository.getAutoplayRecommendation.
-                                onPlayClick = { musicViewModel.playTrack(track, listOf(track)) },
-                                onFavoriteClick = { musicViewModel.toggleFavorite(track) },
-                                onDownloadClick = { musicViewModel.toggleDownload(track) }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Bottom Player Tray
-        if (currentTrack != null) {
-            BottomPlayerTray(
-                track = currentTrack!!,
-                isPlaying = isPlaying,
-                isBuffering = isBuffering,
-                onPlayPauseClick = {
-                    if (isPlaying) musicViewModel.player.pause() else musicViewModel.player.resume()
-                },
-                onNextClick = { musicViewModel.player.skipNext() },
-                onTrayClick = { showPlayerDetail = true }
-            )
-        }
-
-        // Fullscreen Player Detail Bottom Sheet
-        if (showPlayerDetail && currentTrack != null) {
-            val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-            ModalBottomSheet(
-                onDismissRequest = { showPlayerDetail = false },
-                sheetState = sheetState,
-                containerColor = MaterialTheme.colorScheme.background,
-                dragHandle = {
-                    IconButton(onClick = { showPlayerDetail = false }) {
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
-                            contentDescription = "Close player detail",
-                            tint = Color.White
-                        )
-                    }
-                }
+                    .align(Alignment.BottomEnd)
+                    .padding(bottom = 12.dp, end = 12.dp)
+                    .size(1.dp)
             ) {
-                NowPlayingScreen(
-                    track = currentTrack!!,
-                    isPlaying = isPlaying,
-                    isBuffering = isBuffering,
-                    isResolvingAutoplay = musicViewModel.player.isResolvingAutoplay.collectAsState().value,
-                    playbackPos = playbackPos,
-                    duration = duration,
-                    queue = musicViewModel.player.queue.collectAsState().value,
-                    queueIndex = musicViewModel.player.queueIndex.collectAsState().value,
-                    isShuffleEnabled = musicViewModel.player.isShuffleEnabled.collectAsState().value,
-                    repeatMode = musicViewModel.player.repeatMode.collectAsState().value,
-                    lyrics = musicViewModel.lyrics.collectAsState().value,
-                    isLoadingLyrics = musicViewModel.isLoadingLyrics.collectAsState().value,
-                    onPlayPauseClick = {
-                        if (isPlaying) musicViewModel.player.pause() else musicViewModel.player.resume()
-                    },
-                    onPrevClick = { musicViewModel.player.skipPrevious() },
-                    onNextClick = { musicViewModel.player.skipNext() },
-                    onSeek = { musicViewModel.player.seekTo(it) },
-                    onFavoriteClick = { musicViewModel.toggleFavorite(currentTrack!!) },
-                    onShuffleClick = { musicViewModel.player.toggleShuffle() },
-                    onRepeatClick = { musicViewModel.player.cycleRepeatMode() },
-                    onQueueItemClick = { musicViewModel.player.playQueueItem(it) },
-                    onQueueItemRemove = { musicViewModel.player.removeFromQueue(it) }
-                )
+                YouTubePlayerHost(musicPlayer = musicViewModel.player, modifier = Modifier.fillMaxSize())
             }
         }
     }
 }
-
-@Composable
-fun TrackRow(
-    track: Track,
-    onPlayClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
-    onDownloadClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable { onPlayClick() },
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            AsyncImage(
-                model = track.artworkUrl,
-                contentDescription = "${track.title} artwork",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(56.dp)
-                    .clip(RoundedCornerShape(8.dp))
-            )
-
-            Spacer(modifier = Modifier.width(16.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = track.title,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = track.artist,
-                    color = Color.Gray,
-                    fontSize = 13.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            // Favorites & Download controls
-            IconButton(onClick = onFavoriteClick) {
-                Icon(
-                    imageVector = if (track.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                    contentDescription = "Favorite icon",
-                    tint = if (track.isFavorite) MaterialTheme.colorScheme.tertiary else Color.Gray
-                )
-            }
-
-            IconButton(onClick = onDownloadClick) {
-                Icon(
-                    imageVector = Icons.Default.Download,
-                    contentDescription = "Download icon",
-                    tint = if (track.isDownloaded) MaterialTheme.colorScheme.primary else Color.Gray
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun BottomPlayerTray(
-    track: Track,
-    isPlaying: Boolean,
-    isBuffering: Boolean,
-    onPlayPauseClick: () -> Unit,
-    onNextClick: () -> Unit,
-    onTrayClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(72.dp)
-            .background(Color(0xFF13131A))
-            .clickable { onTrayClick() }
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxSize(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                AsyncImage(
-                    model = track.artworkUrl,
-                    contentDescription = "${track.title} art",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                )
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column {
-                    Text(
-                        text = track.title,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = track.artist,
-                        color = Color.Gray,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onPlayPauseClick) {
-                    if (isBuffering) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.primary, strokeWidth = 2.dp)
-                    } else {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Default.Close else Icons.Default.PlayArrow,
-                            contentDescription = "Play/Pause Icon",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-                }
-
-                IconButton(onClick = onNextClick) {
-                    Icon(
-                        imageVector = Icons.Default.SkipNext,
-                        contentDescription = "Skip Next",
-                        tint = Color.White,
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
