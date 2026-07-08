@@ -466,6 +466,16 @@ class MusicPlayer(private val context: Context) {
         _playbackPosition.value = 0L
     }
 
+    /**
+     * Stops playback AND clears the current track, so the mini player / bottom
+     * tray (which only shows while currentTrack != null) disappears entirely.
+     * Used by the tray's close ("X") button.
+     */
+    fun stopAndDismiss() {
+        stop()
+        _currentTrack.value = null
+    }
+
     fun seekTo(position: Long) {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
             youtubeBridge?.seekTo(position / 1000f)
