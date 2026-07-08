@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -73,6 +74,7 @@ import java.util.concurrent.TimeUnit
 
 private enum class NowPlayingTab { QUEUE, LYRICS }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NowPlayingScreen(
     track: Track,
