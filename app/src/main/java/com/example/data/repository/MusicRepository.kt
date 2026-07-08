@@ -15,6 +15,19 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import retrofit2.HttpException
+import java.io.IOException
+
+/**
+ * Result of a [MusicRepository.searchTracks] call. Kept distinct from a plain
+ * `emptyList()` so the UI can tell "genuinely no matches" apart from "the
+ * search itself failed" (bad/missing API key, quota exceeded, no internet,
+ * etc.) instead of showing "No results found" for every failure.
+ */
+sealed class SearchOutcome {
+    data class Success(val tracks: List<Track>) : SearchOutcome()
+    data class Error(val message: String) : SearchOutcome()
+}
 
 class MusicRepository(
     private val apiService: ITunesService,
@@ -94,12 +107,12 @@ class MusicRepository(
      * full songs (not just 30s previews). Two calls: `search` for matches, then
      * `videos` (batched) to pull real durations, since search results don't include them.
      */
-    fun searchTracks(query: String): Flow<List<Track>> = flow {
+    fun searchTracks(query: String): Flow<SearchOutcome> = flow {
         try {
             val searchResponse = youtubeService.search(query = query, maxResults = 25, apiKey = youtubeApiKey)
             val videoIds = searchResponse.items.mapNotNull { it.id?.videoId }
             if (videoIds.isEmpty()) {
-                emit(emptyList())
+                emit(SearchOutcome.Success(emptyList()))
                 return@flow
             }
 
@@ -112,12 +125,27 @@ class MusicRepository(
                     isFavorite = localEntity?.isFavorite ?: false
                 )
             }
-            emit(enriched)
+            emit(SearchOutcome.Success(enriched))
         } catch (e: Exception) {
             e.printStackTrace()
-            emit(emptyList())
+            emit(SearchOutcome.Error(searchErrorMessage(e)))
         }
     }.flowOn(Dispatchers.IO)
+
+    /**
+     * Turns a search failure into a message that actually tells you what to do,
+     * instead of the old behaviour (any exception -> silently show "No results
+     * found", even when the real cause was a missing/invalid YOUTUBE_API_KEY).
+     */
+    private fun searchErrorMessage(e: Exception): String = when (e) {
+        is HttpException -> when (e.code()) {
+            400, 403 -> "Search unavailable: YouTube API key is missing or invalid. Add a real YOUTUBE_API_KEY in your .env file (see SETUP_GUIDE.md)."
+            429 -> "Search unavailable: YouTube API daily quota exceeded. Try again tomorrow or use a different key."
+            else -> "Search failed (server error ${e.code()}). Please try again."
+        }
+        is IOException -> "Search failed: check your internet connection and try again."
+        else -> "Search failed. Please try again."
+    }
 
     /** Finds the single best-matching YouTube video for a title+artist (used by Samples' "Play Full Song" button). */
     suspend fun findBestYouTubeMatch(title: String, artist: String): Track? = withContext(Dispatchers.IO) {
