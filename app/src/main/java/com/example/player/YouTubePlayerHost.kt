@@ -123,9 +123,22 @@ object YouTubeWebViewHolder {
                 
                 webChromeClient = WebChromeClient()
                 addJavascriptInterface(bridge, "AndroidBridge")
-                
+
+                // baseUrl here becomes the Referer YouTube sees for every request this
+                // WebView makes (iframe_api load, video playback, etc). It used to be
+                // set to "https://www.youtube.com" - which looked like a convenient way
+                // to satisfy the IFrame API's origin check, but it actually means every
+                // request claims to BE youtube.com identifying itself, which YouTube's
+                // WebView Media Integrity API now rejects as invalid app identification
+                // (onError code 153). Per YouTube's Required Minimum Functionality docs,
+                // the Referer must instead identify the EMBEDDING APP as a reverse-DNS
+                // HTTPS URL (https://developers.google.com/youtube/terms/required-minimum-functionality#set-the-referer),
+                // i.e. "https://<your.application.id>" - using the real package name
+                // here is what makes YouTube treat this as a legitimate, identified app
+                // instead of a spoofed request, which is what was causing every single
+                // video (regardless of key/queue) to fail to load.
                 loadDataWithBaseURL(
-                    "https://www.youtube.com",
+                    "https://${context.applicationContext.packageName}",
                     PLAYER_HTML,
                     "text/html",
                     "utf-8",
