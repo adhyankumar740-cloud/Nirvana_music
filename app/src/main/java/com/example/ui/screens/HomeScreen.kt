@@ -315,12 +315,19 @@ fun HomeScreen(
                     }
                 }
             ) {
-                PlayerDetailView(
+                NowPlayingScreen(
                     track = currentTrack!!,
                     isPlaying = isPlaying,
                     isBuffering = isBuffering,
+                    isResolvingAutoplay = musicViewModel.player.isResolvingAutoplay.collectAsState().value,
                     playbackPos = playbackPos,
                     duration = duration,
+                    queue = musicViewModel.player.queue.collectAsState().value,
+                    queueIndex = musicViewModel.player.queueIndex.collectAsState().value,
+                    isShuffleEnabled = musicViewModel.player.isShuffleEnabled.collectAsState().value,
+                    repeatMode = musicViewModel.player.repeatMode.collectAsState().value,
+                    lyrics = musicViewModel.lyrics.collectAsState().value,
+                    isLoadingLyrics = musicViewModel.isLoadingLyrics.collectAsState().value,
                     onPlayPauseClick = {
                         if (isPlaying) musicViewModel.player.pause() else musicViewModel.player.resume()
                     },
@@ -328,7 +335,10 @@ fun HomeScreen(
                     onNextClick = { musicViewModel.player.skipNext() },
                     onSeek = { musicViewModel.player.seekTo(it) },
                     onFavoriteClick = { musicViewModel.toggleFavorite(currentTrack!!) },
-                    onDownloadClick = { musicViewModel.toggleDownload(currentTrack!!) }
+                    onShuffleClick = { musicViewModel.player.toggleShuffle() },
+                    onRepeatClick = { musicViewModel.player.cycleRepeatMode() },
+                    onQueueItemClick = { musicViewModel.player.playQueueItem(it) },
+                    onQueueItemRemove = { musicViewModel.player.removeFromQueue(it) }
                 )
             }
         }
@@ -491,158 +501,3 @@ fun BottomPlayerTray(
     }
 }
 
-@Composable
-fun PlayerDetailView(
-    track: Track,
-    isPlaying: Boolean,
-    isBuffering: Boolean,
-    playbackPos: Long,
-    duration: Long,
-    onPlayPauseClick: () -> Unit,
-    onPrevClick: () -> Unit,
-    onNextClick: () -> Unit,
-    onSeek: (Long) -> Unit,
-    onFavoriteClick: () -> Unit,
-    onDownloadClick: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFF0F0F14))
-            .padding(horizontal = 24.dp, vertical = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        AsyncImage(
-            model = track.artworkUrl,
-            contentDescription = "${track.title} artwork large",
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(280.dp)
-                .clip(RoundedCornerShape(24.dp))
-        )
-
-        Spacer(modifier = Modifier.height(28.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = track.title,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 22.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = track.artist,
-                    color = Color.Gray,
-                    fontSize = 16.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Row {
-                IconButton(onClick = onFavoriteClick) {
-                    Icon(
-                        imageVector = if (track.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        contentDescription = "Favorite button",
-                        tint = if (track.isFavorite) MaterialTheme.colorScheme.tertiary else Color.Gray,
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-
-                IconButton(onClick = onDownloadClick) {
-                    Icon(
-                        imageVector = Icons.Default.Download,
-                        contentDescription = "Download button",
-                        tint = if (track.isDownloaded) MaterialTheme.colorScheme.primary else Color.Gray,
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Progress Slider
-        Slider(
-            value = if (duration > 0) playbackPos.toFloat() / duration.toFloat() else 0f,
-            onValueChange = {
-                if (duration > 0) {
-                    onSeek((it * duration).toLong())
-                }
-            },
-            colors = SliderDefaults.colors(
-                thumbColor = MaterialTheme.colorScheme.primary,
-                activeTrackColor = MaterialTheme.colorScheme.primary,
-                inactiveTrackColor = Color.DarkGray
-            ),
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(text = formatTime(playbackPos), color = Color.Gray, fontSize = 12.sp)
-            Text(text = formatTime(duration), color = Color.Gray, fontSize = 12.sp)
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Controls Row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onPrevClick, modifier = Modifier.size(48.dp)) {
-                Icon(
-                    imageVector = Icons.Default.SkipPrevious,
-                    contentDescription = "Skip previous",
-                    tint = Color.White,
-                    modifier = Modifier.size(36.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(32.dp))
-
-            IconButton(onClick = onPlayPauseClick, modifier = Modifier.size(64.dp)) {
-                if (isBuffering) {
-                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary, modifier = Modifier.size(48.dp))
-                } else {
-                    Icon(
-                        imageVector = if (isPlaying) Icons.Default.Close else Icons.Default.PlayArrow,
-                        contentDescription = "Play pause",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(56.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(32.dp))
-
-            IconButton(onClick = onNextClick, modifier = Modifier.size(48.dp)) {
-                Icon(
-                    imageVector = Icons.Default.SkipNext,
-                    contentDescription = "Skip next",
-                    tint = Color.White,
-                    modifier = Modifier.size(36.dp)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(36.dp))
-    }
-}
-
-fun formatTime(ms: Long): String {
-    val sec = (ms / 1000) % 60
-    val min = (ms / (1000 * 60)) % 60
-    return String.format("%02d:%02d", min, sec)
-}
