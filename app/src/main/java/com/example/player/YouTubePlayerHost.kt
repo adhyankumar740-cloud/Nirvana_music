@@ -2,8 +2,10 @@ package com.example.player
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.MutableContextWrapper
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -52,15 +54,29 @@ setInterval(function() {
 </html>
 """
 
-// Global holder to keep WebView alive in the background
+// 1. JADU: Yeh custom view Android ko chakma dega ki view hamesha VISIBLE hai
+class BackgroundWebView(context: Context) : WebView(context) {
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        // App background mein ho tab bhi system ko bolo ki view VISIBLE hai taaki stream buffer na kare
+        super.onWindowVisibilityChanged(View.VISIBLE)
+    }
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, View.VISIBLE)
+    }
+}
+
 object YouTubeWebViewHolder {
-    private var webView: WebView? = null
+    private var webView: BackgroundWebView? = null
+    val contextWrapper = MutableContextWrapper(null)
+    val bridge = YoutubeBridgeImpl()
 
     @SuppressLint("SetJavaScriptEnabled")
-    fun getOrCreateWebView(context: Context, musicPlayer: MusicPlayer): WebView {
+    fun getOrCreateWebView(context: Context): WebView {
+        // Memory leak se bachne ke liye applicationContext wrapper use karenge
+        contextWrapper.baseContext = context.applicationContext
+
         if (webView == null) {
-            // Crucial: Use applicationContext to decouple from Activity lifecycle
-            webView = WebView(context.applicationContext).apply {
+            webView = BackgroundWebView(contextWrapper).apply {
                 settings.javaScriptEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
                 settings.domStorageEnabled = true
@@ -70,7 +86,7 @@ object YouTubeWebViewHolder {
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                 
                 webChromeClient = WebChromeClient()
-                addJavascriptInterface(YoutubeBridgeImpl(musicPlayer), "AndroidBridge")
+                addJavascriptInterface(bridge, "AndroidBridge")
                 
                 loadDataWithBaseURL(
                     "https://www.youtube.com",
@@ -93,13 +109,14 @@ fun YouTubePlayerHost(
     AndroidView(
         modifier = modifier.clip(RoundedCornerShape(10.dp)),
         factory = { ctx ->
-            // Persistent WebView instance fetch karein
-            val webView = YouTubeWebViewHolder.getOrCreateWebView(ctx, musicPlayer)
-            
-            // Agar yeh kisi aur view hierarchy mein attached hai, toh pehle detach karein
+            val webView = YouTubeWebViewHolder.getOrCreateWebView(ctx)
             (webView.parent as? ViewGroup)?.removeView(webView)
-
-            // Dynamic callbacks ko update karein taaki controls break na ho
+            webView
+        },
+        update = { webView ->
+            // 2. DYNAMIC UPDATE: Har recomposition par naya player instance bridge ko pass hoga
+            YouTubeWebViewHolder.bridge.musicPlayer = musicPlayer
+            
             musicPlayer.youtubeBridge = object : YouTubePlayerBridge {
                 override fun loadVideo(videoId: String) {
                     webView.post { webView.evaluateJavascript("loadVideo('$videoId')", null) }
@@ -114,14 +131,14 @@ fun YouTubePlayerHost(
                     webView.post { webView.evaluateJavascript("seekVideo($seconds)", null) }
                 }
             }
-            
-            webView
         }
     )
 }
 
-private class YoutubeBridgeImpl(private val musicPlayer: MusicPlayer) : Any() {
+// Dynamic reference holding bridge class
+class YoutubeBridgeImpl {
     private val mainHandler = Handler(Looper.getMainLooper())
+    var musicPlayer: MusicPlayer? = null
 
     @JavascriptInterface
     fun onReady() {}
@@ -129,14 +146,14 @@ private class YoutubeBridgeImpl(private val musicPlayer: MusicPlayer) : Any() {
     @JavascriptInterface
     fun onStateChange(state: Int, currentTimeSec: Double, durationSec: Double) {
         mainHandler.post {
-            musicPlayer.onYoutubePlayerStateChanged(state, currentTimeSec, durationSec)
+            musicPlayer?.onYoutubePlayerStateChanged(state, currentTimeSec, durationSec)
         }
     }
 
     @JavascriptInterface
     fun onTimeUpdate(currentTimeSec: Double, durationSec: Double) {
         mainHandler.post {
-            musicPlayer.onYoutubeTimeUpdate(currentTimeSec, durationSec)
+            musicPlayer?.onYoutubeTimeUpdate(currentTimeSec, durationSec)
         }
     }
 }
