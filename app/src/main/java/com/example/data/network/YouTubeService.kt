@@ -20,6 +20,12 @@ interface YouTubeService {
         @Query("part") part: String = "snippet",
         @Query("type") type: String = "video",
         @Query("videoCategoryId") videoCategoryId: String = "10", // "Music" category
+        // Without this, results include videos with embedding disabled by the
+        // uploader - those load into our IFrame player, immediately fire a JS
+        // onError, and (since onError wasn't wired up) used to just spin on
+        // "buffering" forever. Filtering here removes that whole failure class
+        // at the source instead of only reacting to it after the fact.
+        @Query("videoEmbeddable") videoEmbeddable: String = "true",
         @Query("maxResults") maxResults: Int = 20,
         @Query("key") apiKey: String
     ): YouTubeSearchResponse
