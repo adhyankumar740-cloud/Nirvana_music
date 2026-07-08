@@ -3,6 +3,7 @@ package com.example.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.model.Lyrics
 import com.example.data.model.Track
 import com.example.data.repository.MusicRepository
 import com.example.player.MusicPlayer
@@ -12,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -35,6 +37,12 @@ class MusicViewModel(
     private val _selectedTab = MutableStateFlow("home")
     val selectedTab = _selectedTab.asStateFlow()
 
+    private val _lyrics = MutableStateFlow<Lyrics?>(null)
+    val lyrics: StateFlow<Lyrics?> = _lyrics.asStateFlow()
+
+    private val _isLoadingLyrics = MutableStateFlow(false)
+    val isLoadingLyrics: StateFlow<Boolean> = _isLoadingLyrics.asStateFlow()
+
     // Observe Saved/Downloaded/Favorite Tracks from database
     val favoriteTracks: StateFlow<List<Track>> = repository.getFavoriteTracks()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -48,6 +56,27 @@ class MusicViewModel(
     init {
         // Load initial home screen content
         fetchHomeRecommendations()
+
+        // Autoplay: YouTube's relatedToVideoId was deprecated in 2023, so this is
+        // an artist/genre-based approximation rather than a true "related videos" call.
+        player.autoplayProvider = { current, excludeIds ->
+            repository.getAutoplayRecommendation(current, excludeIds)
+        }
+
+        // Fetch lyrics (LRCLIB, free/no-key) whenever the playing track changes.
+        viewModelScope.launch {
+            player.currentTrack
+                .distinctUntilChanged { old, new -> old?.id == new?.id }
+                .collectLatest { track ->
+                    if (track == null) {
+                        _lyrics.value = null
+                        return@collectLatest
+                    }
+                    _isLoadingLyrics.value = true
+                    _lyrics.value = repository.getLyrics(track)
+                    _isLoadingLyrics.value = false
+                }
+        }
     }
 
     fun selectTab(tab: String) {
