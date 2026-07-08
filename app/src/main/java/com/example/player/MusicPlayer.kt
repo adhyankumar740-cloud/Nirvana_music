@@ -76,8 +76,13 @@ class MusicPlayer(private val context: Context) {
     // app's lifetime (the host is mounted once, persistently, at the app root).
     var youtubeBridge: YouTubePlayerBridge? = null
 
-    /** Called when the queue naturally runs out (last track ends, repeat=OFF). */
-    var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>) -> Track?)? = null
+    /**
+     * Called when the queue naturally runs out (last track ends, repeat=OFF).
+     * [recentTracks] (current queue + recent play history, full Track objects)
+     * lets the provider recognise "the same song, different upload" and skip
+     * it, not just an exact id match.
+     */
+    var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null
 
     private val _currentTrack = MutableStateFlow<Track?>(null)
     val currentTrack: StateFlow<Track?> = _currentTrack.asStateFlow()
@@ -132,7 +137,19 @@ class MusicPlayer(private val context: Context) {
     private var playOrderPos = 0
 
     private val recentlyPlayedIds = ArrayDeque<Long>()
+    private val recentlyPlayedTracks = ArrayDeque<Track>()
     private val recentlyPlayedCap = 40
+
+    // The videoId we most recently told the WebView/IFrame player to load.
+    // Every YouTube callback reports which videoId it's about; if it doesn't
+    // match this, it's a stale event left over from a track we've since
+    // moved on from and must be ignored (see YouTubePlayerHost.kt).
+    private var loadedYoutubeVideoId: String? = null
+
+    // Guards against the IFrame player getting stuck on "buffering" forever
+    // with no onStateChange/onError ever arriving (flaky WebView/network).
+    private var bufferingWatchdogJob: Job? = null
+    private val bufferingTimeoutMs = 12_000L
 
     private var progressJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Main + Job())
@@ -293,7 +310,8 @@ class MusicPlayer(private val context: Context) {
             _isResolvingAutoplay.value = true
             try {
                 val excludeIds = (_queue.value.map { it.id } + recentlyPlayedIds).toSet()
-                val next = provider(current, excludeIds)
+                val recentTracks = _queue.value + recentlyPlayedTracks
+                val next = provider(current, excludeIds, recentTracks)
                 if (next != null) {
                     _queue.value = _queue.value + next
                     val newIndex = _queue.value.size - 1
@@ -344,7 +362,9 @@ class MusicPlayer(private val context: Context) {
     private fun trackRecentlyPlayed(track: Track) {
         if (recentlyPlayedIds.lastOrNull() != track.id) {
             recentlyPlayedIds.addLast(track.id)
+            recentlyPlayedTracks.addLast(track)
             while (recentlyPlayedIds.size > recentlyPlayedCap) recentlyPlayedIds.removeFirst()
+            while (recentlyPlayedTracks.size > recentlyPlayedCap) recentlyPlayedTracks.removeFirst()
         }
     }
 
@@ -358,6 +378,7 @@ class MusicPlayer(private val context: Context) {
     }
 
     private fun playItunesTrack(track: Track) {
+        cancelBufferingWatchdog()
         youtubeBridge?.pause()
         _currentTrack.value = track
         if (!isApplyingRemote) onLocalSongChange?.invoke(track)
@@ -387,7 +408,33 @@ class MusicPlayer(private val context: Context) {
         _duration.value = track.durationMs
         hasReachedPlayingState = false
         _playbackError.value = null
+        loadedYoutubeVideoId = videoId
         youtubeBridge?.loadVideo(videoId)
+        startBufferingWatchdog(videoId)
+    }
+
+    /**
+     * If we're still buffering this exact video after [bufferingTimeoutMs] with
+     * no onStateChange/onError ever having arrived (e.g. the WebView failed to
+     * load youtube.com/iframe_api on a bad connection), the spinner would
+     * otherwise spin forever with no way out. Treat it as a failed play
+     * attempt and route it through the normal auto-skip breaker instead.
+     */
+    private fun startBufferingWatchdog(videoId: String) {
+        bufferingWatchdogJob?.cancel()
+        bufferingWatchdogJob = scope.launch {
+            delay(bufferingTimeoutMs)
+            if (loadedYoutubeVideoId == videoId && _isBuffering.value && !hasReachedPlayingState) {
+                Log.e("MusicPlayer", "Buffering timed out for videoId=$videoId - treating as failed playback")
+                _isBuffering.value = false
+                registerPlaybackFailureAndMaybeStop()
+            }
+        }
+    }
+
+    private fun cancelBufferingWatchdog() {
+        bufferingWatchdogJob?.cancel()
+        bufferingWatchdogJob = null
     }
 
     fun pause() {
@@ -425,14 +472,20 @@ class MusicPlayer(private val context: Context) {
     }
 
     /** Called by YouTubePlayerHost's JS bridge when the IFrame player's state changes. */
-    fun onYoutubePlayerStateChanged(state: Int, currentTimeSec: Double, durationSec: Double) {
+    fun onYoutubePlayerStateChanged(state: Int, currentTimeSec: Double, durationSec: Double, videoId: String) {
         if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
+        // Stale event from a video we've since swapped out (loadVideoById() can
+        // fire a trailing callback for the OUTGOING video right as a new one is
+        // requested) - without this check it could be misread as the new
+        // track's own state, e.g. "ended" the instant it starts.
+        if (videoId != loadedYoutubeVideoId) return
         when (state) {
             1 -> { // playing
                 _isPlaying.value = true
                 _isBuffering.value = false
                 hasReachedPlayingState = true
                 consecutivePlaybackFailures = 0
+                cancelBufferingWatchdog()
                 if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
                 else onLocalPlayPause?.invoke(true, (currentTimeSec * 1000).toLong())
             }
@@ -443,14 +496,15 @@ class MusicPlayer(private val context: Context) {
                 else onLocalPlayPause?.invoke(false, (currentTimeSec * 1000).toLong())
             }
             3 -> _isBuffering.value = true // buffering
-            0 -> handleTrackEnded() // ended
+            0 -> { cancelBufferingWatchdog(); handleTrackEnded() } // ended
         }
         if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
     }
 
     /** Called periodically by YouTubePlayerHost's JS bridge while a video is loaded. */
-    fun onYoutubeTimeUpdate(currentTimeSec: Double, durationSec: Double) {
+    fun onYoutubeTimeUpdate(currentTimeSec: Double, durationSec: Double, videoId: String) {
         if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
+        if (videoId != loadedYoutubeVideoId) return
         _playbackPosition.value = (currentTimeSec * 1000).toLong()
         if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
     }
@@ -463,9 +517,11 @@ class MusicPlayer(private val context: Context) {
      * so a failed video looked exactly like "stuck buffering forever" in the UI.
      * Now: clear the spinner and skip to the next track, same as a natural track end.
      */
-    fun onYoutubePlayerError(errorCode: Int) {
+    fun onYoutubePlayerError(errorCode: Int, videoId: String) {
         if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
+        if (videoId != loadedYoutubeVideoId) return
         Log.e("MusicPlayer", "YouTube playback error $errorCode for '${_currentTrack.value?.title}' - skipping")
+        cancelBufferingWatchdog()
         _isBuffering.value = false
         _isPlaying.value = false
         registerPlaybackFailureAndMaybeStop()
@@ -528,6 +584,7 @@ class MusicPlayer(private val context: Context) {
 
     fun release() {
         stopProgressTracker()
+        cancelBufferingWatchdog()
         mediaController?.release()
         mediaController = null
     }
