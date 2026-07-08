@@ -1,10 +1,15 @@
 package com.example
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -64,9 +69,22 @@ class MainActivity : ComponentActivity() {
         JamViewModel.Factory(appContainer.jamManager, appContainer.jamChatManager, appContainer.musicPlayer)
     }
 
+    // No-op either way: if denied, the foreground service/playback still runs,
+    // it just won't be able to show the media notification or lock-screen
+    // controls (required as a runtime permission on Android 13+/API 33+).
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         setContent {
             MyApplicationTheme {
@@ -88,9 +106,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-    // Release system audio resources safely
-        appContainer.musicPlayer?.pause()
-        appContainer.samplesPlayerManager?.pause()
+        // Do NOT pause musicPlayer here: it's backed by a Media3 foreground
+        // service (PlaybackService) specifically so iTunes-sourced playback
+        // keeps running after this Activity is destroyed (backgrounded,
+        // rotated, or swiped from Recents). Pausing it here was killing
+        // background playback - PlaybackService.onTaskRemoved() stops itself
+        // once nothing is playing, so this call was tearing down the service
+        // right as the app was backgrounded.
+        // The Samples feed is foreground-only content (its ExoPlayer instances
+        // live in Compose, not a service), so it's correct to pause that one.
+        appContainer.samplesPlayerManager.pause()
     }
 }
 
