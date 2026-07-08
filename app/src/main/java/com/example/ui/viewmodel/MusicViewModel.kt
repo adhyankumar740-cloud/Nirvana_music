@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.model.Lyrics
 import com.example.data.model.Track
 import com.example.data.repository.MusicRepository
+import com.example.data.repository.SearchOutcome
 import com.example.player.MusicPlayer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -30,6 +31,11 @@ class MusicViewModel(
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching = _isSearching.asStateFlow()
+
+    // Set only when a search actually FAILS (bad API key, quota, no internet),
+    // as opposed to a search that succeeded but genuinely had zero matches.
+    private val _searchError = MutableStateFlow<String?>(null)
+    val searchError = _searchError.asStateFlow()
 
     private val _homeTracks = MutableStateFlow<List<Track>>(emptyList())
     val homeTracks = _homeTracks.asStateFlow()
@@ -98,14 +104,24 @@ class MusicViewModel(
 
     fun search(query: String) {
         _searchQuery.value = query
+        _searchError.value = null
         if (query.trim().isEmpty()) {
             _searchResults.value = emptyList()
             return
         }
         viewModelScope.launch {
             _isSearching.value = true
-            repository.searchTracks(query).collectLatest { results ->
-                _searchResults.value = results
+            repository.searchTracks(query).collectLatest { outcome ->
+                when (outcome) {
+                    is SearchOutcome.Success -> {
+                        _searchResults.value = outcome.tracks
+                        _searchError.value = null
+                    }
+                    is SearchOutcome.Error -> {
+                        _searchResults.value = emptyList()
+                        _searchError.value = outcome.message
+                    }
+                }
                 _isSearching.value = false
             }
         }
