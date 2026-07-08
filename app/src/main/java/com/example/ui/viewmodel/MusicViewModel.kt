@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -83,6 +84,41 @@ class MusicViewModel(
                     _isLoadingLyrics.value = false
                 }
         }
+
+        // Home Search used to fire a full YouTube API call (search = 100 quota
+        // units, on a free 10,000-unit/day project) on EVERY keystroke, with no
+        // debounce and no cancellation of in-flight calls - so typing a single
+        // 8-letter query alone could burn ~800+ units, exhausting the daily
+        // quota almost instantly even without "really" using search much.
+        // Fix: wait for the user to pause typing, and collectLatest cancels
+        // any still-in-flight request the moment a newer query comes in.
+        viewModelScope.launch {
+            _searchQuery
+                .debounce(400)
+                .distinctUntilChanged()
+                .collectLatest { query ->
+                    if (query.trim().isEmpty()) {
+                        _searchResults.value = emptyList()
+                        _searchError.value = null
+                        _isSearching.value = false
+                        return@collectLatest
+                    }
+                    _isSearching.value = true
+                    repository.searchTracks(query).collectLatest { outcome ->
+                        when (outcome) {
+                            is SearchOutcome.Success -> {
+                                _searchResults.value = outcome.tracks
+                                _searchError.value = null
+                            }
+                            is SearchOutcome.Error -> {
+                                _searchResults.value = emptyList()
+                                _searchError.value = outcome.message
+                            }
+                        }
+                    }
+                    _isSearching.value = false
+                }
+        }
     }
 
     fun selectTab(tab: String) {
@@ -102,29 +138,9 @@ class MusicViewModel(
         }
     }
 
+    /** Called on every keystroke - just updates state. The actual (debounced) API call happens in init{}. */
     fun search(query: String) {
         _searchQuery.value = query
-        _searchError.value = null
-        if (query.trim().isEmpty()) {
-            _searchResults.value = emptyList()
-            return
-        }
-        viewModelScope.launch {
-            _isSearching.value = true
-            repository.searchTracks(query).collectLatest { outcome ->
-                when (outcome) {
-                    is SearchOutcome.Success -> {
-                        _searchResults.value = outcome.tracks
-                        _searchError.value = null
-                    }
-                    is SearchOutcome.Error -> {
-                        _searchResults.value = emptyList()
-                        _searchError.value = outcome.message
-                    }
-                }
-                _isSearching.value = false
-            }
-        }
     }
 
     fun toggleFavorite(track: Track) {
