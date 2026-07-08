@@ -2,7 +2,6 @@ package com.example.player
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.MutableContextWrapper
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -54,10 +53,9 @@ setInterval(function() {
 </html>
 """
 
-// 1. JADU: Yeh custom view Android ko chakma dega ki view hamesha VISIBLE hai
+// Background execution ko simulate karne ke liye custom WebView
 class BackgroundWebView(context: Context) : WebView(context) {
     override fun onWindowVisibilityChanged(visibility: Int) {
-        // App background mein ho tab bhi system ko bolo ki view VISIBLE hai taaki stream buffer na kare
         super.onWindowVisibilityChanged(View.VISIBLE)
     }
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
@@ -67,16 +65,13 @@ class BackgroundWebView(context: Context) : WebView(context) {
 
 object YouTubeWebViewHolder {
     private var webView: BackgroundWebView? = null
-    val contextWrapper = MutableContextWrapper(null)
     val bridge = YoutubeBridgeImpl()
 
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreateWebView(context: Context): WebView {
-        // Memory leak se bachne ke liye applicationContext wrapper use karenge
-        contextWrapper.baseContext = context.applicationContext
-
         if (webView == null) {
-            webView = BackgroundWebView(contextWrapper).apply {
+            // Bina kisi null wrapper ke, safe context initialize kiya
+            webView = BackgroundWebView(context.applicationContext).apply {
                 settings.javaScriptEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
                 settings.domStorageEnabled = true
@@ -114,7 +109,7 @@ fun YouTubePlayerHost(
             webView
         },
         update = { webView ->
-            // 2. DYNAMIC UPDATE: Har recomposition par naya player instance bridge ko pass hoga
+            // Bridge ko hamesha latest musicPlayer ka reference milega bina crash ke
             YouTubeWebViewHolder.bridge.musicPlayer = musicPlayer
             
             musicPlayer.youtubeBridge = object : YouTubePlayerBridge {
@@ -135,7 +130,6 @@ fun YouTubePlayerHost(
     )
 }
 
-// Dynamic reference holding bridge class
 class YoutubeBridgeImpl {
     private val mainHandler = Handler(Looper.getMainLooper())
     var musicPlayer: MusicPlayer? = null
