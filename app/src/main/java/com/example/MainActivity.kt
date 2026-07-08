@@ -88,9 +88,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Stop playing to release system audio resources
-        appContainer.musicPlayer?.stop()
-        appContainer.samplesPlayerManager?.stop()
+    // Release system audio resources safely
+        appContainer.musicPlayer?.pause()
+        appContainer.musicPlayer?.release()
+
+        appContainer.samplesPlayerManager?.pause()
+        appContainer.samplesPlayerManager?.release()
     }
 }
 
