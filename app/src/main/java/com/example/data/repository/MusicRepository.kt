@@ -46,6 +46,12 @@ class MusicRepository(
     // would otherwise silently burn another 100 units for zero new information.
     private val searchResultsCache = mutableMapOf<String, List<Track>>()
 
+    // YouTube's Data API has no genre field, so every YOUTUBE-sourced Track
+    // reports genre = "Music" (see YouTubeModels.toTrack()). Cache one cheap
+    // iTunes title+artist lookup per track id so "same genre" autoplay has a
+    // real genre to work with instead of silently degrading to "same artist".
+    private val resolvedGenreCache = mutableMapOf<Long, String>()
+
     /**
      * Samples feed - iTunes `musicVideo` entity, which (unlike the plain "song" entity)
      * provides a real ~30s *video* preview URL, not just audio. Used by the vertical
@@ -189,28 +195,82 @@ class MusicRepository(
     }
 
     /**
+     * Resolves a real genre for [track]. YouTube-sourced tracks always come in
+     * with genre = "Music" (the Data API doesn't expose one), so without this,
+     * "same genre" autoplay had nothing to actually match on. One cheap iTunes
+     * title+artist lookup, cached per track id.
+     */
+    private suspend fun resolveGenre(track: Track): String {
+        if (track.genre.isNotBlank() && track.genre != "Music") return track.genre
+        resolvedGenreCache[track.id]?.let { return it }
+        val resolved = try {
+            val response = apiService.search(term = "${track.title} ${track.artist}", media = "music", entity = "song", limit = 1)
+            response.results.firstOrNull()?.primaryGenreName?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            null
+        } ?: "Music"
+        resolvedGenreCache[track.id] = resolved
+        return resolved
+    }
+
+    /**
+     * Strips common re-upload noise ("Official Video", "(Lyrics)", "ft. X", "4K", ...)
+     * so two different uploads of the *same song* are recognised as the same song
+     * rather than as two different "next" candidates.
+     */
+    private fun normalizedSongKey(track: Track): String {
+        val noise = Regex(
+            """(?i)\(.*?\)|\[.*?\]|official\s*(music\s*)?(video|audio)?|lyrics?(\s*video)?|hd|4k|full\s*(song|video)|audio|video|ft\..*|feat\..*|remaster(ed)?.*"""
+        )
+        fun clean(s: String) = s.replace(noise, " ")
+            .lowercase()
+            .replace(Regex("[^a-z0-9 ]"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        return "${clean(track.title)}|${clean(track.artist)}"
+    }
+
+    /**
      * Autoplay recommendation for when the queue naturally ends. YouTube deprecated
      * the search.list `relatedToVideoId` parameter in 2023 (no longer supported), so
-     * there's no public API for "true" related-video recommendations. This is an
-     * honest approximation: search by artist (+ genre as a tiebreaker), skipping
-     * anything in [excludeIds] (current queue + recent play history) to avoid repeats.
+     * there's no public API for "true" related-video recommendations. This searches
+     * genre-first, so "next" is a genuinely different song in the same genre rather
+     * than just more of the same artist/channel (the old artist-only behaviour).
+     * [excludeIds] (current queue + recent play history) and [recentTracks] (the
+     * same, as full Track objects) are both used - ids to skip exact repeats, and
+     * the normalized title+artist of [recentTracks] to skip re-uploads of a song
+     * that was already just played under a different video id.
      */
-    suspend fun getAutoplayRecommendation(currentTrack: Track, excludeIds: Set<Long>): Track? = withContext(Dispatchers.IO) {
+    suspend fun getAutoplayRecommendation(
+        currentTrack: Track,
+        excludeIds: Set<Long>,
+        recentTracks: List<Track> = emptyList()
+    ): Track? = withContext(Dispatchers.IO) {
         try {
+            val genre = resolveGenre(currentTrack)
+            val excludeKeys = (recentTracks + currentTrack).map { normalizedSongKey(it) }.toSet()
+
+            // Genre first (a different song, same vibe); artist queries are only
+            // a fallback for when the genre search comes back empty.
             val queries = listOf(
-                "${currentTrack.artist} ${currentTrack.genre}".trim(),
+                "$genre songs".trim(),
+                "${currentTrack.artist} $genre".trim(),
                 currentTrack.artist
-            )
+            ).filter { it.isNotBlank() }.distinct()
+
             for (query in queries) {
-                if (query.isBlank()) continue
                 val searchResponse = youtubeService.search(query = query, maxResults = 15, apiKey = youtubeApiKey)
                 val videoIds = searchResponse.items.mapNotNull { it.id?.videoId }
                     .filter { it.hashCode().toLong() !in excludeIds }
                 if (videoIds.isEmpty()) continue
 
                 val detailsResponse = youtubeService.getVideoDetails(ids = videoIds.take(10).joinToString(","), apiKey = youtubeApiKey)
-                val candidate = detailsResponse.items.map { it.toTrack() }.firstOrNull { it.id !in excludeIds }
-                if (candidate != null) return@withContext candidate
+                val candidate = detailsResponse.items
+                    .map { it.toTrack() }
+                    .firstOrNull { it.id !in excludeIds && normalizedSongKey(it) !in excludeKeys }
+                // Carry the resolved genre forward so the next hop in an autoplay
+                // chain doesn't have to re-look it up and doesn't drift genre.
+                if (candidate != null) return@withContext candidate.copy(genre = genre)
             }
             null
         } catch (e: Exception) {
