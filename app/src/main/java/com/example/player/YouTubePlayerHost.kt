@@ -25,6 +25,15 @@ private const val PLAYER_HTML = """
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 var player;
+var isPlayerReady = false;
+// If loadVideo()/playVideo() arrive while the IFrame API is still loading
+// (typically the very first "Play" tap right after the app starts, before
+// the external youtube.com/iframe_api script + YT.Player finish initializing),
+// the calls used to be silently dropped (player was undefined) - the UI stayed
+// on "buffering" forever since no video was ever actually loaded. Now we queue
+// the pending action and flush it once onReady fires.
+var pendingVideoId = null;
+var pendingShouldPlay = false;
 function onYouTubeIframeAPIReady() {
   player = new YT.Player('player', {
     height: '100%',
@@ -32,15 +41,37 @@ function onYouTubeIframeAPIReady() {
     videoId: '',
     playerVars: { playsinline: 1, controls: 1, rel: 0, modestbranding: 1 },
     events: {
-      onReady: function(e) { AndroidBridge.onReady(); },
+      onReady: function(e) {
+        isPlayerReady = true;
+        AndroidBridge.onReady();
+        if (pendingVideoId) {
+          player.loadVideoById(pendingVideoId);
+          pendingVideoId = null;
+        } else if (pendingShouldPlay) {
+          player.playVideo();
+        }
+        pendingShouldPlay = false;
+      },
       onStateChange: function(e) {
         AndroidBridge.onStateChange(e.data, player.getCurrentTime(), player.getDuration());
       }
     }
   });
 }
-function loadVideo(id) { if (player && player.loadVideoById) player.loadVideoById(id); }
-function playVideo() { if (player && player.playVideo) player.playVideo(); }
+function loadVideo(id) {
+  if (isPlayerReady && player && player.loadVideoById) {
+    player.loadVideoById(id);
+  } else {
+    pendingVideoId = id;
+  }
+}
+function playVideo() {
+  if (isPlayerReady && player && player.playVideo) {
+    player.playVideo();
+  } else {
+    pendingShouldPlay = true;
+  }
+}
 function pauseVideo() { if (player && player.pauseVideo) player.pauseVideo(); }
 function seekVideo(s) { if (player && player.seekTo) player.seekTo(s, true); }
 setInterval(function() {
