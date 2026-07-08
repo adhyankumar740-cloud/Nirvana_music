@@ -403,6 +403,22 @@ class MusicPlayer(private val context: Context) {
         if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
     }
 
+    /**
+     * Called by YouTubePlayerHost's JS bridge when the IFrame player fails to load
+     * or play a video (embedding disallowed by the uploader, video removed/private,
+     * region-locked, etc.). Previously nothing listened for this - isBuffering had
+     * already been set true right before loadVideo() and nothing ever cleared it,
+     * so a failed video looked exactly like "stuck buffering forever" in the UI.
+     * Now: clear the spinner and skip to the next track, same as a natural track end.
+     */
+    fun onYoutubePlayerError(errorCode: Int) {
+        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
+        Log.e("MusicPlayer", "YouTube playback error $errorCode for '${_currentTrack.value?.title}' - skipping")
+        _isBuffering.value = false
+        _isPlaying.value = false
+        advance(1)
+    }
+
     // ---------------- Jam (remote) sync ----------------
 
     /** Mirrors a song change that arrived from a Jam partner (does not re-broadcast). */
