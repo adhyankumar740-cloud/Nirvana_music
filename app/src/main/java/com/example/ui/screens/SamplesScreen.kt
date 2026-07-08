@@ -49,6 +49,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -133,6 +135,7 @@ fun SamplesScreen(
  * the outer VerticalPager could see the swipe gesture; PlayerView without its
  * own controls does not.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun SampleVideoPage(
     track: Track,
@@ -205,12 +208,22 @@ private fun SampleVideoPage(
     }
 
     AndroidView(
-        modifier = modifier,
+        // The setOnTouchListener below only stops PlayerView's OWN internal gesture
+        // handling - it does NOT stop Compose's AndroidView interop layer from
+        // claiming the whole touch stream for itself by default. That claim is what
+        // was actually blocking VerticalPager: it never even saw the swipe. This
+        // pointerInteropFilter is what explicitly hands the gesture back to Compose
+        // ancestors (the Pager) instead of letting the embedded native view keep it.
+        modifier = modifier.pointerInteropFilter { false },
         factory = { ctx ->
             PlayerView(ctx).apply {
                 player = exoPlayer
                 useController = false
                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM // crop-to-fill, true 9:16 like Shorts/Reels
+                // Belt-and-suspenders: also disable PlayerView's own internal touch
+                // handling (tap-to-toggle-controls gesture detector). The Box overlay
+                // in SampleFeedCard already handles tap-to-play/pause.
+                setOnTouchListener { _, _ -> false }
             }
         }
     )
