@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.BuildConfig
 import com.example.data.database.MusicDatabase
 import com.example.data.network.ITunesService
+import com.example.data.network.LrcLibService
 import com.example.data.network.YouTubeService
 import com.example.data.repository.MusicRepository
 import com.example.jam.JamChatManager
@@ -25,11 +26,16 @@ class AppContainer(private val context: Context) {
         YouTubeService.create()
     }
 
+    val lrcLibService: LrcLibService by lazy {
+        LrcLibService.create()
+    }
+
     val musicRepository: MusicRepository by lazy {
         MusicRepository(
             apiService = apiService,
             youtubeService = youtubeService,
             youtubeApiKey = BuildConfig.YOUTUBE_API_KEY,
+            lrcLibService = lrcLibService,
             savedTrackDao = database.savedTrackDao()
         )
     }
