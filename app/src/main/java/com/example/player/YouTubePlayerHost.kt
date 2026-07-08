@@ -1,13 +1,15 @@
 package com.example.player
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,14 +52,39 @@ setInterval(function() {
 </html>
 """
 
-/**
- * Mounted ONCE, persistently, near the app's root (see MainActivity) so playback
- * survives navigation between tabs. Kept small/visible per YouTube's Terms of
- * Service (the official player must stay visible - it can't be hidden or have
- * its branding/controls stripped). This is what makes full-song YouTube
- * playback compliant instead of extracting a raw stream URL.
- */
-@SuppressLint("SetJavaScriptEnabled")
+// Global holder to keep WebView alive in the background
+object YouTubeWebViewHolder {
+    private var webView: WebView? = null
+
+    @SuppressLint("SetJavaScriptEnabled")
+    fun getOrCreateWebView(context: Context, musicPlayer: MusicPlayer): WebView {
+        if (webView == null) {
+            // Crucial: Use applicationContext to decouple from Activity lifecycle
+            webView = WebView(context.applicationContext).apply {
+                settings.javaScriptEnabled = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                settings.domStorageEnabled = true
+                settings.databaseEnabled = true
+                
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                
+                webChromeClient = WebChromeClient()
+                addJavascriptInterface(YoutubeBridgeImpl(musicPlayer), "AndroidBridge")
+                
+                loadDataWithBaseURL(
+                    "https://www.youtube.com",
+                    PLAYER_HTML,
+                    "text/html",
+                    "utf-8",
+                    null
+                )
+            }
+        }
+        return webView!!
+    }
+}
+
 @Composable
 fun YouTubePlayerHost(
     musicPlayer: MusicPlayer,
@@ -66,45 +93,38 @@ fun YouTubePlayerHost(
     AndroidView(
         modifier = modifier.clip(RoundedCornerShape(10.dp)),
         factory = { ctx ->
-            WebView(ctx).also { webView ->
-                webView.settings.javaScriptEnabled = true
-                webView.settings.mediaPlaybackRequiresUserGesture = false
-                webView.webChromeClient = WebChromeClient()
-                webView.addJavascriptInterface(YoutubeBridgeImpl(musicPlayer), "AndroidBridge")
-                webView.loadDataWithBaseURL(
-                    "https://www.youtube.com",
-                    PLAYER_HTML,
-                    "text/html",
-                    "utf-8",
-                    null
-                )
+            // Persistent WebView instance fetch karein
+            val webView = YouTubeWebViewHolder.getOrCreateWebView(ctx, musicPlayer)
+            
+            // Agar yeh kisi aur view hierarchy mein attached hai, toh pehle detach karein
+            (webView.parent as? ViewGroup)?.removeView(webView)
 
-                musicPlayer.youtubeBridge = object : YouTubePlayerBridge {
-                    override fun loadVideo(videoId: String) {
-                        webView.post { webView.evaluateJavascript("loadVideo('$videoId')", null) }
-                    }
-                    override fun play() {
-                        webView.post { webView.evaluateJavascript("playVideo()", null) }
-                    }
-                    override fun pause() {
-                        webView.post { webView.evaluateJavascript("pauseVideo()", null) }
-                    }
-                    override fun seekTo(seconds: Float) {
-                        webView.post { webView.evaluateJavascript("seekVideo($seconds)", null) }
-                    }
+            // Dynamic callbacks ko update karein taaki controls break na ho
+            musicPlayer.youtubeBridge = object : YouTubePlayerBridge {
+                override fun loadVideo(videoId: String) {
+                    webView.post { webView.evaluateJavascript("loadVideo('$videoId')", null) }
+                }
+                override fun play() {
+                    webView.post { webView.evaluateJavascript("playVideo()", null) }
+                }
+                override fun pause() {
+                    webView.post { webView.evaluateJavascript("pauseVideo()", null) }
+                }
+                override fun seekTo(seconds: Float) {
+                    webView.post { webView.evaluateJavascript("seekVideo($seconds)", null) }
                 }
             }
+            
+            webView
         }
     )
 }
 
-private class YoutubeBridgeImpl(private val musicPlayer: MusicPlayer) {
+private class YoutubeBridgeImpl(private val musicPlayer: MusicPlayer) : Any() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
-    fun onReady() {
-        // no-op: player is ready, loadVideo() calls will now work
-    }
+    fun onReady() {}
 
     @JavascriptInterface
     fun onStateChange(state: Int, currentTimeSec: Double, durationSec: Double) {
