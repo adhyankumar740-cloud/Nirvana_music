@@ -109,6 +109,23 @@ class MusicPlayer(private val context: Context) {
     private val _isResolvingAutoplay = MutableStateFlow(false)
     val isResolvingAutoplay: StateFlow<Boolean> = _isResolvingAutoplay.asStateFlow()
 
+    // Surfaces when auto-skip gives up after several tracks in a row failed
+    // (see registerPlaybackFailureAndMaybeStop below). Null = no error.
+    private val _playbackError = MutableStateFlow<String?>(null)
+    val playbackError: StateFlow<String?> = _playbackError.asStateFlow()
+
+    // Guards against a rapid cascade of skips: a video that errors (onError)
+    // OR that reports "ended" without ever actually reaching the "playing"
+    // state (a bad/near-zero-length result) used to immediately trigger the
+    // next track, which could fail the same way - chewing through the whole
+    // queue (and then autoplay) in under a second with no way to stop it.
+    // After maxConsecutivePlaybackFailures in a row, we stop advancing instead
+    // of continuing to cascade, and surface an error so the UI isn't left
+    // silently spinning either.
+    private var hasReachedPlayingState = false
+    private var consecutivePlaybackFailures = 0
+    private val maxConsecutivePlaybackFailures = 3
+
     // Play order (list of indices into _queue.value) - separate from the
     // user-visible queue order so shuffling doesn't reshuffle what's shown.
     private var playOrder: List<Int> = emptyList()
@@ -170,6 +187,8 @@ class MusicPlayer(private val context: Context) {
 
     fun setQueue(tracks: List<Track>, startIndex: Int = 0) {
         if (tracks.isEmpty()) return
+        consecutivePlaybackFailures = 0
+        _playbackError.value = null
         _queue.value = tracks
         rebuildPlayOrder(anchorIndex = startIndex.coerceIn(0, tracks.size - 1))
         _queueIndex.value = playOrder[playOrderPos]
@@ -196,6 +215,8 @@ class MusicPlayer(private val context: Context) {
     fun playQueueItem(index: Int) {
         val tracks = _queue.value
         if (index !in tracks.indices) return
+        consecutivePlaybackFailures = 0
+        _playbackError.value = null
         playOrderPos = playOrder.indexOf(index).coerceAtLeast(0)
         _queueIndex.value = index
         play(tracks[index])
@@ -288,6 +309,33 @@ class MusicPlayer(private val context: Context) {
     }
 
     private fun handleTrackEnded() {
+        if (!hasReachedPlayingState) {
+            // Reported "ended" without ever actually reaching "playing" - this is
+            // a bad result (e.g. near-zero-length clip), not a real finished song.
+            // Route it through the same breaker as a hard playback error.
+            registerPlaybackFailureAndMaybeStop()
+            return
+        }
+        advance(1)
+    }
+
+    /**
+     * Counts one failed playback attempt. Keeps auto-skipping (same as before)
+     * for the first couple of failures in a row, but after
+     * [maxConsecutivePlaybackFailures] gives up instead of cascading forever -
+     * stops the spinner, surfaces [playbackError], and waits for the user to
+     * pick something else rather than silently burning through the whole queue.
+     */
+    private fun registerPlaybackFailureAndMaybeStop() {
+        consecutivePlaybackFailures++
+        if (consecutivePlaybackFailures >= maxConsecutivePlaybackFailures) {
+            consecutivePlaybackFailures = 0
+            _isBuffering.value = false
+            _isPlaying.value = false
+            _playbackError.value = "Kai gaane play nahi ho paaye, ruk gaya - kuch aur try karein."
+            Log.e("MusicPlayer", "Stopping auto-skip after $maxConsecutivePlaybackFailures playback failures in a row")
+            return
+        }
         advance(1)
     }
 
@@ -337,6 +385,8 @@ class MusicPlayer(private val context: Context) {
         _isPlaying.value = false
         _playbackPosition.value = 0L
         _duration.value = track.durationMs
+        hasReachedPlayingState = false
+        _playbackError.value = null
         youtubeBridge?.loadVideo(videoId)
     }
 
@@ -381,6 +431,8 @@ class MusicPlayer(private val context: Context) {
             1 -> { // playing
                 _isPlaying.value = true
                 _isBuffering.value = false
+                hasReachedPlayingState = true
+                consecutivePlaybackFailures = 0
                 if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
                 else onLocalPlayPause?.invoke(true, (currentTimeSec * 1000).toLong())
             }
@@ -416,7 +468,7 @@ class MusicPlayer(private val context: Context) {
         Log.e("MusicPlayer", "YouTube playback error $errorCode for '${_currentTrack.value?.title}' - skipping")
         _isBuffering.value = false
         _isPlaying.value = false
-        advance(1)
+        registerPlaybackFailureAndMaybeStop()
     }
 
     // ---------------- Jam (remote) sync ----------------
