@@ -40,7 +40,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import com.example.data.model.TrackSource
 import com.example.di.AppContainer
 import com.example.player.YouTubePlayerHost
 import com.example.ui.screens.AuthScreen
@@ -240,16 +239,17 @@ fun MainAppLayout(
                 "library" -> LibraryScreen(musicViewModel = musicViewModel, authViewModel = authViewModel)
             }
 
-            // Mounted ONCE, persistently, so it survives tab navigation. Kept visibly
-            // small (not hidden) whenever a YouTube full-song is playing - required by
-            // YouTube's Terms of Service (the official player can't be hidden/disguised).
-            val activeTrack by musicViewModel.player.currentTrack.collectAsState()
-            val isYoutubeActive = activeTrack?.source == TrackSource.YOUTUBE
+            // NOTE: originally kept visibly small here whenever a YouTube full-song
+            // was playing, because YouTube's Terms of Service require the official
+            // IFrame player to stay visible (it can't be hidden/disguised) when used
+            // this way. Hidden below at the user's explicit request, with that ToS
+            // risk understood - YouTube could revoke API access for this app if this
+            // is flagged, which would break YouTube-sourced playback entirely.
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(bottom = 12.dp, end = 12.dp)
-                    .size(if (isYoutubeActive) 72.dp else 1.dp)
+                    .size(1.dp)
             ) {
                 YouTubePlayerHost(musicPlayer = musicViewModel.player, modifier = Modifier.fillMaxSize())
             }
