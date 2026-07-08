@@ -90,10 +90,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     // Release system audio resources safely
         appContainer.musicPlayer?.pause()
-        appContainer.musicPlayer?.release()
-
         appContainer.samplesPlayerManager?.pause()
-        appContainer.samplesPlayerManager?.release()
     }
 }
 
