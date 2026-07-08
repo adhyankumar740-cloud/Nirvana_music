@@ -54,7 +54,8 @@ function onYouTubeIframeAPIReady() {
       },
       onStateChange: function(e) {
         AndroidBridge.onStateChange(e.data, player.getCurrentTime(), player.getDuration());
-      }
+      },
+      onError: function(e) { AndroidBridge.onError(e.data); }
     }
   });
 }
@@ -179,6 +180,15 @@ class YoutubeBridgeImpl {
     fun onTimeUpdate(currentTimeSec: Double, durationSec: Double) {
         mainHandler.post {
             musicPlayer?.onYoutubeTimeUpdate(currentTimeSec, durationSec)
+        }
+    }
+
+    // error codes: 2=invalid id, 5=HTML5 error, 100=not found/removed,
+    // 101/150=embedding disallowed by uploader
+    @JavascriptInterface
+    fun onError(errorCode: Int) {
+        mainHandler.post {
+            musicPlayer?.onYoutubePlayerError(errorCode)
         }
     }
 }
