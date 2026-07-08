@@ -75,6 +75,7 @@ fun HomeScreen(
     val searchQuery by musicViewModel.searchQuery.collectAsState()
     val searchResults by musicViewModel.searchResults.collectAsState()
     val isSearching by musicViewModel.isSearching.collectAsState()
+    val searchError by musicViewModel.searchError.collectAsState()
     val homeTracks by musicViewModel.homeTracks.collectAsState()
 
     val currentTrack by musicViewModel.player.currentTrack.collectAsState()
@@ -258,8 +259,8 @@ fun HomeScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "No results found for \"$searchQuery\"",
-                            color = Color.Gray,
+                            text = searchError ?: "No results found for \"$searchQuery\"",
+                            color = if (searchError != null) MaterialTheme.colorScheme.error else Color.Gray,
                             textAlign = TextAlign.Center
                         )
                     }
