@@ -2,9 +2,12 @@ package com.example.data.repository
 
 import com.example.data.database.SavedTrackDao
 import com.example.data.database.SavedTrackEntity
+import com.example.data.model.Lyrics
 import com.example.data.model.Track
+import com.example.data.model.parseSyncedLyrics
 import com.example.data.model.toTrack
 import com.example.data.network.ITunesService
+import com.example.data.network.LrcLibService
 import com.example.data.network.YouTubeService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -17,6 +20,7 @@ class MusicRepository(
     private val apiService: ITunesService,
     private val youtubeService: YouTubeService,
     private val youtubeApiKey: String,
+    private val lrcLibService: LrcLibService,
     private val savedTrackDao: SavedTrackDao
 ) {
     // Cache for Samples feed to ensure instant load times
@@ -123,6 +127,51 @@ class MusicRepository(
             val videoId = searchResponse.items.firstNotNullOfOrNull { it.id?.videoId } ?: return@withContext null
             val detailsResponse = youtubeService.getVideoDetails(ids = videoId, apiKey = youtubeApiKey)
             detailsResponse.items.firstOrNull()?.toTrack()
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Autoplay recommendation for when the queue naturally ends. YouTube deprecated
+     * the search.list `relatedToVideoId` parameter in 2023 (no longer supported), so
+     * there's no public API for "true" related-video recommendations. This is an
+     * honest approximation: search by artist (+ genre as a tiebreaker), skipping
+     * anything in [excludeIds] (current queue + recent play history) to avoid repeats.
+     */
+    suspend fun getAutoplayRecommendation(currentTrack: Track, excludeIds: Set<Long>): Track? = withContext(Dispatchers.IO) {
+        try {
+            val queries = listOf(
+                "${currentTrack.artist} ${currentTrack.genre}".trim(),
+                currentTrack.artist
+            )
+            for (query in queries) {
+                if (query.isBlank()) continue
+                val searchResponse = youtubeService.search(query = query, maxResults = 15, apiKey = youtubeApiKey)
+                val videoIds = searchResponse.items.mapNotNull { it.id?.videoId }
+                    .filter { it.hashCode().toLong() !in excludeIds }
+                if (videoIds.isEmpty()) continue
+
+                val detailsResponse = youtubeService.getVideoDetails(ids = videoIds.take(10).joinToString(","), apiKey = youtubeApiKey)
+                val candidate = detailsResponse.items.map { it.toTrack() }.firstOrNull { it.id !in excludeIds }
+                if (candidate != null) return@withContext candidate
+            }
+            null
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /** Fetches lyrics from LRCLIB (free, no key). Returns null if the track isn't found - no placeholder text. */
+    suspend fun getLyrics(track: Track): Lyrics? = withContext(Dispatchers.IO) {
+        try {
+            val results = lrcLibService.search(trackName = track.title, artistName = track.artist)
+            val best = results.firstOrNull { !it.instrumental.let { inst -> inst == true } } ?: return@withContext null
+            val synced = parseSyncedLyrics(best.syncedLyrics)
+            val lyrics = Lyrics(plain = best.plainLyrics, synced = synced)
+            if (lyrics.isAvailable) lyrics else null
         } catch (e: Exception) {
             e.printStackTrace()
             null
