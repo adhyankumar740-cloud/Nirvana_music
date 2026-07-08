@@ -25,10 +25,15 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -128,7 +133,25 @@ fun MainAppLayout(
 ) {
     val selectedTab by musicViewModel.selectedTab.collectAsState()
 
+    // playbackError was already being set internally by MusicPlayer whenever
+    // auto-skip gives up after repeated failures, but nothing ever displayed
+    // it - so a failure just looked like silent, endless skipping with no
+    // explanation. Surfacing it here (once, at the app root) fixes that for
+    // every screen, not just Now Playing.
+    val snackbarHostState = remember { SnackbarHostState() }
+    val playbackError by musicViewModel.player.playbackError.collectAsState()
+    LaunchedEffect(playbackError) {
+        val message = playbackError ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        musicViewModel.player.clearPlaybackError()
+    }
+
     Scaffold(
+        snackbarHost = {
+            SnackbarHost(hostState = snackbarHostState) { data ->
+                Snackbar(snackbarData = data, containerColor = MaterialTheme.colorScheme.errorContainer)
+            }
+        },
         bottomBar = {
             NavigationBar(
                 containerColor = MaterialTheme.colorScheme.surface,
