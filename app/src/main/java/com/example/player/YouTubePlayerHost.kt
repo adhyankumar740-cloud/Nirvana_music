@@ -34,6 +34,14 @@ var isPlayerReady = false;
 // the pending action and flush it once onReady fires.
 var pendingVideoId = null;
 var pendingShouldPlay = false;
+// The video id the app most recently asked us to load. Sent back with every
+// callback so the Android side can tell a fresh event apart from a stale one
+// that was actually about the video being swapped OUT (loadVideoById() can
+// fire a trailing state/error event for the outgoing video right as the new
+// one is requested) - without this, a stale "ended"/error for song A could
+// arrive just after song B started and be misread as "song B already ended",
+// which used to cause an instant, wrong auto-skip.
+var currentVideoId = '';
 function onYouTubeIframeAPIReady() {
   player = new YT.Player('player', {
     height: '100%',
@@ -53,13 +61,14 @@ function onYouTubeIframeAPIReady() {
         pendingShouldPlay = false;
       },
       onStateChange: function(e) {
-        AndroidBridge.onStateChange(e.data, player.getCurrentTime(), player.getDuration());
+        AndroidBridge.onStateChange(e.data, player.getCurrentTime(), player.getDuration(), currentVideoId);
       },
-      onError: function(e) { AndroidBridge.onError(e.data); }
+      onError: function(e) { AndroidBridge.onError(e.data, currentVideoId); }
     }
   });
 }
 function loadVideo(id) {
+  currentVideoId = id;
   if (isPlayerReady && player && player.loadVideoById) {
     player.loadVideoById(id);
   } else {
@@ -77,7 +86,7 @@ function pauseVideo() { if (player && player.pauseVideo) player.pauseVideo(); }
 function seekVideo(s) { if (player && player.seekTo) player.seekTo(s, true); }
 setInterval(function() {
   if (player && player.getCurrentTime) {
-    try { AndroidBridge.onTimeUpdate(player.getCurrentTime(), player.getDuration()); } catch (e) {}
+    try { AndroidBridge.onTimeUpdate(player.getCurrentTime(), player.getDuration(), currentVideoId); } catch (e) {}
   }
 }, 500);
 </script>
@@ -170,25 +179,25 @@ class YoutubeBridgeImpl {
     fun onReady() {}
 
     @JavascriptInterface
-    fun onStateChange(state: Int, currentTimeSec: Double, durationSec: Double) {
+    fun onStateChange(state: Int, currentTimeSec: Double, durationSec: Double, videoId: String) {
         mainHandler.post {
-            musicPlayer?.onYoutubePlayerStateChanged(state, currentTimeSec, durationSec)
+            musicPlayer?.onYoutubePlayerStateChanged(state, currentTimeSec, durationSec, videoId)
         }
     }
 
     @JavascriptInterface
-    fun onTimeUpdate(currentTimeSec: Double, durationSec: Double) {
+    fun onTimeUpdate(currentTimeSec: Double, durationSec: Double, videoId: String) {
         mainHandler.post {
-            musicPlayer?.onYoutubeTimeUpdate(currentTimeSec, durationSec)
+            musicPlayer?.onYoutubeTimeUpdate(currentTimeSec, durationSec, videoId)
         }
     }
 
     // error codes: 2=invalid id, 5=HTML5 error, 100=not found/removed,
     // 101/150=embedding disallowed by uploader
     @JavascriptInterface
-    fun onError(errorCode: Int) {
+    fun onError(errorCode: Int, videoId: String) {
         mainHandler.post {
-            musicPlayer?.onYoutubePlayerError(errorCode)
+            musicPlayer?.onYoutubePlayerError(errorCode, videoId)
         }
     }
 }
