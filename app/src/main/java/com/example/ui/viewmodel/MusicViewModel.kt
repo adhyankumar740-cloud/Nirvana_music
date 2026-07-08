@@ -66,8 +66,8 @@ class MusicViewModel(
 
         // Autoplay: YouTube's relatedToVideoId was deprecated in 2023, so this is
         // an artist/genre-based approximation rather than a true "related videos" call.
-        player.autoplayProvider = { current, excludeIds ->
-            repository.getAutoplayRecommendation(current, excludeIds)
+        player.autoplayProvider = { current, excludeIds, recentTracks ->
+            repository.getAutoplayRecommendation(current, excludeIds, recentTracks)
         }
 
         // Fetch lyrics (LRCLIB, free/no-key) whenever the playing track changes.
