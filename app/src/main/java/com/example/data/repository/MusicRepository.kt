@@ -39,6 +39,13 @@ class MusicRepository(
     // Cache for Samples feed to ensure instant load times
     private val samplesCache = mutableListOf<Track>()
 
+    // Cache of successful Home Search results, keyed by normalized query. YouTube's
+    // search.list costs 100 quota units per call out of a 10,000/day budget - so
+    // re-searching something you (or another screen) already searched for in this
+    // session (retyping, backspacing back to an earlier query, returning to the tab)
+    // would otherwise silently burn another 100 units for zero new information.
+    private val searchResultsCache = mutableMapOf<String, List<Track>>()
+
     /**
      * Samples feed - iTunes `musicVideo` entity, which (unlike the plain "song" entity)
      * provides a real ~30s *video* preview URL, not just audio. Used by the vertical
@@ -108,10 +115,27 @@ class MusicRepository(
      * `videos` (batched) to pull real durations, since search results don't include them.
      */
     fun searchTracks(query: String): Flow<SearchOutcome> = flow {
+        val cacheKey = query.trim().lowercase()
+
+        // Serve repeats from cache instead of spending another 100 quota units
+        // on a search we already have the answer to.
+        searchResultsCache[cacheKey]?.let { cached ->
+            val reenriched = cached.map { track ->
+                val localEntity = savedTrackDao.getSavedTrackById(track.id)
+                track.copy(
+                    isDownloaded = localEntity?.isDownloaded ?: false,
+                    isFavorite = localEntity?.isFavorite ?: false
+                )
+            }
+            emit(SearchOutcome.Success(reenriched))
+            return@flow
+        }
+
         try {
             val searchResponse = youtubeService.search(query = query, maxResults = 25, apiKey = youtubeApiKey)
             val videoIds = searchResponse.items.mapNotNull { it.id?.videoId }
             if (videoIds.isEmpty()) {
+                searchResultsCache[cacheKey] = emptyList()
                 emit(SearchOutcome.Success(emptyList()))
                 return@flow
             }
@@ -125,6 +149,9 @@ class MusicRepository(
                     isFavorite = localEntity?.isFavorite ?: false
                 )
             }
+            // Only cache genuine successes - never cache a quota/network failure,
+            // so the next attempt (e.g. after the quota resets) can try for real.
+            searchResultsCache[cacheKey] = tracks
             emit(SearchOutcome.Success(enriched))
         } catch (e: Exception) {
             e.printStackTrace()
