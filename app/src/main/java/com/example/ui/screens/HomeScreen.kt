@@ -275,7 +275,14 @@ fun HomeScreen(
                         items(searchResults) { track ->
                             TrackRow(
                                 track = track,
-                                onPlayClick = { musicViewModel.playTrack(track, searchResults) },
+                                // Queue just this one song (not the whole search
+                                // results list) - otherwise "next" just walks
+                                // down the search results in relevance order
+                                // (mixed genres/artists, sometimes the same song
+                                // re-uploaded twice) instead of picking a genre
+                                // match. See MusicPlayer.triggerAutoplay / 
+                                // MusicRepository.getAutoplayRecommendation.
+                                onPlayClick = { musicViewModel.playTrack(track, listOf(track)) },
                                 onFavoriteClick = { musicViewModel.toggleFavorite(track) },
                                 onDownloadClick = { musicViewModel.toggleDownload(track) }
                             )
