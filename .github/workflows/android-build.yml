@@ -1,3 +1,4 @@
+
 name: Android CI Build
 
 # Jab bhi main/master pe push ho, PR bane, ya "Run workflow" button se manually chalaya jaye
@@ -33,16 +34,53 @@ jobs:
 
       # Debug build ke liye debug.keystore chahiye (build.gradle.kts isko
       # rootDir mein dhoondta hai). Yeh file .gitignore mein hai isliye
-      # repo mein nahi hai — CI mein standard Android debug keystore
-      # generate kar rahe hain (well-known default alias/passwords).
-      - name: Generate debug keystore
+      # repo mein nahi hai.
+      #
+      # Firebase email-link (magic link) login App Links verification ke
+      # liye is keystore ka SHA-1/SHA-256 fingerprint Firebase console mein
+      # register karna padta hai — isliye keystore HAR build mein same
+      # rehna chahiye (naya keystore = naya fingerprint = link phir se
+      # browser mein khulega, app mein nahi).
+      #
+      # Agar `DEBUG_KEYSTORE_BASE64` repo secret set hai, wahi (fixed)
+      # keystore decode karke use karte hain. Pehli baar (secret set nahi
+      # hai) ek naya generate karte hain aur is run ke logs mein uska
+      # base64 print kar dete hain — wahan se copy karke ek naya repo
+      # secret (Settings > Secrets and variables > Actions) bana do naam
+      # `DEBUG_KEYSTORE_BASE64` se, taaki agli baar se yehi stable rahe.
+      - name: Generate or restore debug keystore
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
-          keytool -genkey -v \
-            -keystore debug.keystore \
-            -storepass android -keypass android \
-            -alias androiddebugkey \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "Restoring existing debug.keystore from DEBUG_KEYSTORE_BASE64 secret (stable fingerprint)."
+            echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > debug.keystore
+          else
+            echo "No DEBUG_KEYSTORE_BASE64 secret set - generating a fresh debug.keystore."
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo ""
+            echo "======================================================================"
+            echo "IMPORTANT (only needed if you use Firebase email-link login):"
+            echo "Copy the base64 block below and save it as a new repo secret named"
+            echo "DEBUG_KEYSTORE_BASE64 (Settings > Secrets and variables > Actions)."
+            echo "This keeps your debug keystore - and its SHA fingerprint below -"
+            echo "the same on every future build."
+            echo "======================================================================"
+            base64 -w 0 debug.keystore
+            echo ""
+            echo "======================================================================"
+          fi
+
+      - name: Print debug keystore SHA fingerprints
+        run: |
+          echo "Add these under Firebase console > Project settings > your Android app > Add fingerprint:"
+          keytool -list -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android \
+            | grep -E "SHA1:|SHA256:"
 
       # Ensure required Android SDK platform/build-tools are present
       # (project uses compileSdk 36.1 / targetSdk 36).
