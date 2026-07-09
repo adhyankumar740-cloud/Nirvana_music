@@ -106,9 +106,17 @@ dependencies {
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   implementation(libs.firebase.database)
+  // firebase-auth is kept ONLY for JamManager's anonymous sign-in, which
+  // satisfies the Realtime Database's "auth != null" security rule for the
+  // Jam feature - it has nothing to do with user-facing login anymore.
   implementation(libs.firebase.auth)
   implementation(libs.play.services.auth)
   implementation(libs.firebase.appcheck.recaptcha)
+  // Native "Sign in with Google" via Credential Manager - this is the
+  // user-facing login now (see AuthViewModel.kt). No backend required.
+  implementation(libs.androidx.credentials)
+  implementation(libs.androidx.credentials.play.services.auth)
+  implementation(libs.googleid)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.coroutines.play.services)
