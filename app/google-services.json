@@ -15,6 +15,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "645739166879-kpmp2t97soas2u97egm7m9qohrkk26ru.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aistudio.harmonixmusic.vkzpnb",
+            "certificate_hash": "26e776338c99357d68720678cf4787d835a7c49c"
+          }
+        },
+        {
           "client_id": "645739166879-r25846lbjpje0tgsdf2kaaddk2slspoe.apps.googleusercontent.com",
           "client_type": 3
         }
