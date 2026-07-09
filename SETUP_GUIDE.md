@@ -94,35 +94,24 @@ Jam ab **local simulation nahi hai** — real Firebase Realtime Database use kar
 ### Jaan-boojh kar simplify kiya gaya:
 - Message ka "read receipt" status (SENT/DELIVERED/READ tick icon) abhi hamesha SENT dikhata hai — per-participant read-tracking add nahi ki (low value ke liye bahut zyada Firebase writes hoti, agar chahiye to bata dena, add kar dunga).
 
-## 6b. Email Magic-Link Login — Firebase setup required (100% phone se, 100% free)
+## 6b. Google Sign-In Login — koi backend/Firebase nahi chahiye, 100% free
 
-Login ab **asli** hai — email daalo, ek "magic link" mail aata hai, use tap karo aur app mein login ho jaata ho. Koi password nahi, koi backend server nahi (sirf Firebase Authentication ka free Spark plan) — matlab pura flow laptop ke bina, phone se hi ho sakta hai.
+Login ab **native "Sign in with Google"** hai (Android ka Credential Manager) — koi email link, koi Firebase Auth, koi App Links setup nahi. Google account picker seedha on-device dikhta hai, ek tap mein login ho jaata hai. Ye purani Firebase email-link wali problem (link browser mein khulna, expire ho jaana, cross-device mismatch) permanently fix karta hai kyunki ab poora flow on-device hai — koi email/deep-link involve hi nahi.
 
-### Step 1 — Firebase console mein 2 cheezein enable karo
-1. https://console.firebase.google.com pe apna project (`nirvanamusic-75348`) kholo.
-2. **Build → Authentication → Sign-in method** mein jaake:
-   - **Email/Password** provider enable karo.
-   - Usi ke andar **Email link (passwordless sign-in)** bhi enable karo.
-3. Save karo.
+### Setup — kuch bhi extra nahi karna
+`google-services.json` mein already ek Web OAuth client (`645739166879-r25846lbjpje0tgsdf2kaaddk2slspoe.apps.googleusercontent.com`) aur Android OAuth client (debug keystore ke SHA-1 se linked) maujood hain — ye pehle se Firebase project ke saath set ho chuke the, isliye Google Sign-In turant kaam karega, koi naya console setup nahi chahiye.
 
-### Step 2 — App ka signing fingerprint register karo (App Links ke liye zaroori)
-Email ke andar jo link aata hai, wo tabhi seedha app mein khulega (browser mein nahi) jab Firebase ko pata ho ki ye APK "asli" hai — iske liye app ki signing key ka SHA-1/SHA-256 fingerprint chahiye.
+**Bas ek cheez check karo:** agar aap apna khud ka keystore/signing key use kar rahe ho (naya `DEBUG_KEYSTORE_BASE64` ya release keystore), to uska SHA-1 bhi Firebase console mein add karna hoga:
+1. https://console.firebase.google.com → apna project (`nirvanamusic-75348`) → **Project settings (⚙️) → General tab → apna Android app card → "Add fingerprint"**.
+2. Naya SHA-1 add karo, `google-services.json` dobara download karke `app/` folder mein replace karo.
 
-1. Is repo ko GitHub pe push karo (ya "Run workflow" se Actions manually chalao) — jaisa Section 4 mein bataya hai.
-2. Workflow complete hone ke baad, us run ko kholo → **"Generate or restore debug keystore"** aur **"Print debug keystore SHA fingerprints"** step ke logs kholo. Wahan SHA1/SHA256 dikhega, aur pehli baar ek lamba base64 block bhi dikhega.
-3. Us base64 block ko copy karke ek naya repo secret banao: **Settings → Secrets and variables → Actions → New repository secret**, naam `DEBUG_KEYSTORE_BASE64`, value wahi base64. Isse har build mein same keystore/fingerprint use hoga (warna har build pe naya keystore banega aur link kaam karna band kar dega).
-4. Firebase console mein: **Project settings (⚙️) → General tab → neeche apna Android app card → "Add fingerprint"** — dono SHA1 aur SHA256 add karo (2 alag entries).
-
-### Step 3 — Test karo
-1. Naya APK download karo (Actions → Artifacts → `harmonix-debug-apk`), phone pe install karo.
-2. App kholo → username + email daalo → "SEND MAGIC LINK" dabao.
-3. Apna Gmail/email app kholo, Firebase se aayi mail dhoondo (subject kuch aisa: "Sign in to nirvanamusic-75348"), us link ko tap karo.
-4. Link seedha Harmonix app khol dega aur automatically login ho jaayega.
-
-**Agar link tap karne pe browser khul jaaye, app nahi:** iska matlab Step 2 (SHA fingerprint) abhi register nahi hua ya `DEBUG_KEYSTORE_BASE64` set karne ke baad naya build nahi banaya — dobara Step 2 check karo aur ek naya build chalao.
+### Test karo
+1. APK install karo, app kholo → "Continue with Google" dabao.
+2. Google account picker aayega — apna account choose karo. Bas, login ho gaya (koi email check karne ki zaroorat nahi).
 
 ### Jaan-boojh kar simplify kiya gaya:
-- Username sirf display ke liye local profile field hai (SharedPreferences mein), Firebase sirf email verify karta hai — koi separate username uniqueness-check backend nahi hai.
+- Koi backend/server-side session nahi hai — login sirf is device par "kaunsa Google account use ho raha hai" track karta hai (SharedPreferences mein), display ke liye. Kisi bhi remote resource ko ye gate nahi karta.
+- JamManager ka Firebase Anonymous Auth isse alag hai — wo sirf Realtime Database ki "auth != null" security rule satisfy karne ke liye internally chalta hai, user ko kabhi dikhta hi nahi. Usse chhua nahi gaya hai.
 
 ## 7. YouTube full songs + video Samples — done
 
