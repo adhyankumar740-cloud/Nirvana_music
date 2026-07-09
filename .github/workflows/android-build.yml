@@ -1,4 +1,3 @@
-
 name: Android CI Build
 
 # Jab bhi main/master pe push ho, PR bane, ya "Run workflow" button se manually chalaya jaye
@@ -25,7 +24,7 @@ jobs:
           java-version: '17'
 
       # Project ka koi Gradle Wrapper (gradlew) nahi hai isliye Gradle
-      # directly is action se install/run karwa rahe hain — sahi Gradle
+      # directly is action se install/run karwa rahe hain â€” sahi Gradle
       # version explicitly bata rahe hain (AGP 9.1.1 ko Gradle 9.3.1+ chahiye)
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -38,14 +37,14 @@ jobs:
       #
       # Firebase email-link (magic link) login App Links verification ke
       # liye is keystore ka SHA-1/SHA-256 fingerprint Firebase console mein
-      # register karna padta hai — isliye keystore HAR build mein same
+      # register karna padta hai â€” isliye keystore HAR build mein same
       # rehna chahiye (naya keystore = naya fingerprint = link phir se
       # browser mein khulega, app mein nahi).
       #
       # Agar `DEBUG_KEYSTORE_BASE64` repo secret set hai, wahi (fixed)
       # keystore decode karke use karte hain. Pehli baar (secret set nahi
       # hai) ek naya generate karte hain aur is run ke logs mein uska
-      # base64 print kar dete hain — wahan se copy karke ek naya repo
+      # base64 print kar dete hain â€” wahan se copy karke ek naya repo
       # secret (Settings > Secrets and variables > Actions) bana do naam
       # `DEBUG_KEYSTORE_BASE64` se, taaki agli baar se yehi stable rahe.
       - name: Generate or restore debug keystore
@@ -120,3 +119,45 @@ jobs:
           name: harmonix-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+  deploy-hosting:
+    name: Deploy assetlinks.json to Firebase Hosting
+    runs-on: ubuntu-latest
+    # Sirf tabhi chalega jab FIREBASE_SERVICE_ACCOUNT secret set hai - warna
+    # skip ho jayega (APK build isse block nahi hota, wo alag job hai).
+    if: ${{ github.event_name != 'pull_request' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # assetlinks.json (public/.well-known/assetlinks.json) ko
+      # nirvanamusic-75348.firebaseapp.com/.well-known/assetlinks.json pe
+      # deploy karta hai - Android isi file ko fetch karke verify karta hai
+      # ki magic-link email ka link is app ke liye hai (App Links). Isà¤•à¥‡
+      # bina link hamesha "Site not found" wale browser page pe hi khulega.
+      #
+      # Setup (ek hi baar): Firebase console > Project settings >
+      # Service accounts tab > "Generate new private key" - JSON download
+      # hogi, uska pura content copy karke repo secret bana do naam
+      # FIREBASE_SERVICE_ACCOUNT se (Settings > Secrets and variables >
+      # Actions > New repository secret).
+      - name: Deploy to Firebase Hosting
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "FIREBASE_SERVICE_ACCOUNT secret set nahi hai - Hosting deploy skip kar rahe hain."
+            echo "Magic-link login App Links ke liye ye zaroori hai - README/SETUP_GUIDE.md dekho."
+            exit 0
+          fi
+          echo "$FIREBASE_SERVICE_ACCOUNT" > /tmp/firebase-service-account.json
+          export GOOGLE_APPLICATION_CREDENTIALS=/tmp/firebase-service-account.json
+          # NOTE: firebase-tools 15.22.2+ has a known CI-auth regression
+          # (breaks GOOGLE_APPLICATION_CREDENTIALS-based deploys), so we
+          # pin to a version before it rather than using @latest.
+          npx --yes firebase-tools@15.22.1 deploy \
+            --only hosting \
+            --project nirvanamusic-75348 \
+            --non-interactive
+          rm -f /tmp/firebase-service-account.json
