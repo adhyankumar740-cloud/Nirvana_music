@@ -134,6 +134,20 @@ fun MainAppLayout(
 ) {
     val selectedTab by musicViewModel.selectedTab.collectAsState()
 
+    // "Play Full Song" on the Samples feed starts playback in musicViewModel.player
+    // (see SamplesViewModel.playFullSong) but never left the Samples tab, so the
+    // song audibly started while the screen stayed on the sample feed - it looked
+    // like tapping the button did nothing. Once a full song actually starts
+    // playing while the user is still on "samples", jump them to Home, where the
+    // BottomPlayerTray / NowPlayingScreen live.
+    val fullSongCurrentTrack by musicViewModel.player.currentTrack.collectAsState()
+    val isResolvingFullSong by samplesViewModel.isResolvingFullSong.collectAsState()
+    LaunchedEffect(fullSongCurrentTrack, isResolvingFullSong) {
+        if (selectedTab == "samples" && !isResolvingFullSong && fullSongCurrentTrack != null) {
+            musicViewModel.selectTab("home")
+        }
+    }
+
     // playbackError was already being set internally by MusicPlayer whenever
     // auto-skip gives up after repeated failures, but nothing ever displayed
     // it - so a failure just looked like silent, endless skipping with no
