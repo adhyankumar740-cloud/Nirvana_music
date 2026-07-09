@@ -19,3 +19,8 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Required by androidx.credentials (native Google Sign-In) when minification
+# is enabled - see https://developer.android.com/identity/sign-in/credential-manager
+-if class androidx.credentials.CredentialManager
+-keep class androidx.credentials.playservices.** { *; }
