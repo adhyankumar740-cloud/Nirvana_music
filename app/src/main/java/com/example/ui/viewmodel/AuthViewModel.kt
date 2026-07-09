@@ -1,131 +1,138 @@
 package com.example.ui.viewmodel
 
 import android.content.Context
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.google.firebase.Firebase
-import com.google.firebase.auth.actionCodeSettings
-import com.google.firebase.auth.auth
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
+import java.security.MessageDigest
+import java.util.UUID
 
-/** UI state for the auth/magic-link screen. */
+/** UI state for the Google sign-in screen. */
 sealed interface AuthUiState {
     data object SignedOut : AuthUiState
-    data object Sending : AuthUiState
-    /** Link emailed successfully - waiting for the user to tap it. */
-    data class LinkSent(val email: String) : AuthUiState
-    data object Verifying : AuthUiState
+    data object Loading : AuthUiState
     data class Error(val message: String) : AuthUiState
 }
 
 /**
- * Real login: Firebase "email link" (passwordless / magic-link) sign-in.
- * The user enters their email, we mail them a sign-in link, and tapping
- * that link (handled as a deep link in MainActivity) verifies the email
- * and signs them in via FirebaseAuth - no password, no typed code, and
- * it's genuinely free (Firebase Auth's free Spark plan covers this).
+ * Real login: native "Sign in with Google" via Android's Credential Manager.
  *
- * Login state itself comes straight from FirebaseAuth.currentUser, which
- * Firebase persists on-device automatically - so the user stays logged in
- * across app restarts without any extra work here. The username is just a
- * local display-name profile field, stored in SharedPreferences.
+ * This replaces the old Firebase email-link (magic-link) flow entirely.
+ * There's no backend, no Firebase Auth, no emailed link, and no App Links /
+ * deep-link setup - the Google account picker shows up on-device as a
+ * bottom sheet, the user taps their account once, and sign-in completes
+ * immediately. It's completely free (no usage limits, no plan required)
+ * and doesn't depend on email deliverability or link verification, which
+ * is what made the old flow unreliable.
+ *
+ * We don't run a backend, so there's no server-side session - login state
+ * is simply "does this device have a saved Google identity", persisted
+ * locally in SharedPreferences. That's enough for a display-name/email
+ * profile; nothing in this app gates access to a remote resource on it.
+ *
+ * Note: JamManager separately uses Firebase Anonymous Auth under the hood -
+ * that is NOT this login. It only exists to satisfy the Realtime Database's
+ * "auth != null" security rule for the Jam feature and is invisible to the
+ * user, so it's left untouched.
  */
 class AuthViewModel(private val context: Context) : ViewModel() {
 
-    private val auth = Firebase.auth
+    private val credentialManager = CredentialManager.create(context)
     private val prefs = context.applicationContext
         .getSharedPreferences("auth_prefs", Context.MODE_PRIVATE)
 
-    private val _isLoggedIn = MutableStateFlow(auth.currentUser != null)
+    private val _isLoggedIn = MutableStateFlow(prefs.contains(KEY_EMAIL))
     val isLoggedIn = _isLoggedIn.asStateFlow()
 
     private val _username = MutableStateFlow(prefs.getString(KEY_USERNAME, "MelodyMinds") ?: "MelodyMinds")
     val username = _username.asStateFlow()
 
-    private val _email = MutableStateFlow(auth.currentUser?.email ?: prefs.getString(KEY_PENDING_EMAIL, "") ?: "")
+    private val _email = MutableStateFlow(prefs.getString(KEY_EMAIL, "") ?: "")
     val email = _email.asStateFlow()
 
-    private val _uiState = MutableStateFlow<AuthUiState>(
-        if (auth.currentUser != null) AuthUiState.SignedOut else AuthUiState.SignedOut
-    )
+    private val _uiState = MutableStateFlow<AuthUiState>(AuthUiState.SignedOut)
     val uiState = _uiState.asStateFlow()
 
-    /** Step 1: user submits email + display name -> we email them a sign-in link. */
-    fun sendSignInLink(emailInput: String, usernameInput: String) {
-        val trimmedEmail = emailInput.trim()
-        val trimmedUsername = usernameInput.trim()
-        if (trimmedEmail.isEmpty() || trimmedUsername.isEmpty()) return
-
-        _uiState.value = AuthUiState.Sending
-
-        val actionCodeSettings = actionCodeSettings {
-            // Firebase Hosting default domain for this project - must be an
-            // Authorized domain in Firebase console > Authentication > Settings.
-            url = "https://nirvanamusic-75348.firebaseapp.com/finishSignIn"
-            handleCodeInApp = true
-            setAndroidPackageName(
-                "com.aistudio.harmonixmusic.vkzpnb",
-                true, // installIfNotAvailable
-                ""    // minimumVersion (none enforced)
-            )
-        }
-
-        viewModelScope.launch {
-            try {
-                auth.sendSignInLinkToEmail(trimmedEmail, actionCodeSettings).await()
-                // Remember which email + username this link belongs to, so we can
-                // finish sign-in when the user taps the link (possibly after the
-                // process was killed while they were checking their inbox).
-                prefs.edit()
-                    .putString(KEY_PENDING_EMAIL, trimmedEmail)
-                    .putString(KEY_PENDING_USERNAME, trimmedUsername)
-                    .apply()
-                _email.value = trimmedEmail
-                _uiState.value = AuthUiState.LinkSent(trimmedEmail)
-            } catch (e: Exception) {
-                _uiState.value = AuthUiState.Error(e.message ?: "Couldn't send the sign-in email. Try again.")
-            }
-        }
-    }
-
     /**
-     * Step 2: called from MainActivity when the app is opened via the emailed
-     * link (deep link). Verifies the link and completes sign-in.
+     * Launches the native Google account picker and signs the user in.
+     * [activityContext] must be an Activity context (not applicationContext) -
+     * Credential Manager needs it to host the picker UI. Pass `LocalContext.current`
+     * from the composable that calls this.
      */
-    fun handleSignInLink(link: String?) {
-        if (link == null || !auth.isSignInWithEmailLink(link)) return
+    fun signInWithGoogle(activityContext: Context) {
+        _uiState.value = AuthUiState.Loading
 
-        val pendingEmail = prefs.getString(KEY_PENDING_EMAIL, null)
-        if (pendingEmail == null) {
-            _uiState.value = AuthUiState.Error(
-                "Ye link kisi aur email session ka lagta hai. Same device pe dobara email daal ke try karo."
-            )
-            return
-        }
+        val nonce = MessageDigest.getInstance("SHA-256")
+            .digest(UUID.randomUUID().toString().toByteArray())
+            .joinToString("") { "%02x".format(it) }
 
-        _uiState.value = AuthUiState.Verifying
+        // filterByAuthorizedAccounts = false shows every Google account on the
+        // device (not just ones already linked to this app), so first-time
+        // sign-in always works in a single step - no retry-on-empty-list logic.
+        val googleIdOption = GetGoogleIdOption.Builder()
+            .setFilterByAuthorizedAccounts(false)
+            .setServerClientId(WEB_CLIENT_ID)
+            .setAutoSelectEnabled(false)
+            .setNonce(nonce)
+            .build()
+
+        val request = GetCredentialRequest.Builder()
+            .addCredentialOption(googleIdOption)
+            .build()
 
         viewModelScope.launch {
             try {
-                auth.signInWithEmailLink(pendingEmail, link).await()
-                val savedUsername = prefs.getString(KEY_PENDING_USERNAME, null) ?: "MelodyMinds"
+                val result = credentialManager.getCredential(context = activityContext, request = request)
+                val credential = result.credential
 
-                _username.value = savedUsername
-                _email.value = pendingEmail
-                _isLoggedIn.value = true
-                _uiState.value = AuthUiState.SignedOut // reset, screen won't show since isLoggedIn is now true
+                if (credential !is CustomCredential ||
+                    credential.type != GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+                ) {
+                    _uiState.value = AuthUiState.Error("Ye credential Google ka nahi tha. Dobara try karo.")
+                    return@launch
+                }
+
+                val googleCredential = try {
+                    GoogleIdTokenCredential.createFrom(credential.data)
+                } catch (e: GoogleIdTokenParsingException) {
+                    _uiState.value = AuthUiState.Error("Google response parse nahi hua. Dobara try karo.")
+                    return@launch
+                }
+
+                val displayName = googleCredential.displayName?.takeIf { it.isNotBlank() }
+                    ?: googleCredential.id.substringBefore("@")
+                val userEmail = googleCredential.id // Google ID token's "id" is the account email.
 
                 prefs.edit()
-                    .putString(KEY_USERNAME, savedUsername)
-                    .remove(KEY_PENDING_EMAIL)
-                    .remove(KEY_PENDING_USERNAME)
+                    .putString(KEY_USERNAME, displayName)
+                    .putString(KEY_EMAIL, userEmail)
                     .apply()
+
+                _username.value = displayName
+                _email.value = userEmail
+                _isLoggedIn.value = true
+                _uiState.value = AuthUiState.SignedOut // reset - screen won't show since isLoggedIn is now true
+            } catch (e: GetCredentialCancellationException) {
+                // User dismissed the picker - not an error, just go back to idle.
+                _uiState.value = AuthUiState.SignedOut
+            } catch (e: GetCredentialException) {
+                _uiState.value = AuthUiState.Error(
+                    "Google sign-in fail ho gaya. Dobara try karo."
+                )
             } catch (e: Exception) {
-                _uiState.value = AuthUiState.Error(e.message ?: "Login link expire ho gaya ya invalid hai. Dobara try karo.")
+                _uiState.value = AuthUiState.Error(e.message ?: "Kuch galat ho gaya. Dobara try karo.")
             }
         }
     }
@@ -135,15 +142,33 @@ class AuthViewModel(private val context: Context) : ViewModel() {
     }
 
     fun logout() {
-        auth.signOut()
-        _isLoggedIn.value = false
-        _uiState.value = AuthUiState.SignedOut
+        viewModelScope.launch {
+            try {
+                // Clears Credential Manager's own sign-in state so the account
+                // picker shows up fresh next time instead of silently
+                // re-selecting the same account.
+                credentialManager.clearCredentialState(ClearCredentialStateRequest())
+            } catch (_: Exception) {
+                // Best-effort - local state below is cleared regardless.
+            }
+            prefs.edit().clear().apply()
+            _username.value = "MelodyMinds"
+            _email.value = ""
+            _isLoggedIn.value = false
+            _uiState.value = AuthUiState.SignedOut
+        }
     }
 
     companion object {
         private const val KEY_USERNAME = "username"
-        private const val KEY_PENDING_EMAIL = "pending_email"
-        private const val KEY_PENDING_USERNAME = "pending_username"
+        private const val KEY_EMAIL = "email"
+
+        // The WEB (client_type 3) OAuth client from app/google-services.json -
+        // required by GetGoogleIdOption.setServerClientId(). This is NOT the
+        // Android client ID; Google Sign-In always needs the web one here,
+        // even for a purely native Android app with no backend.
+        private const val WEB_CLIENT_ID =
+            "645739166879-r25846lbjpje0tgsdf2kaaddk2slspoe.apps.googleusercontent.com"
     }
 
     class Factory(private val context: Context) : ViewModelProvider.Factory {
