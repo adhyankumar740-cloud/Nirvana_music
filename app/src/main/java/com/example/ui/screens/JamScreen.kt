@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -211,7 +212,11 @@ private fun JamRoomContent(jamViewModel: JamViewModel) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // imePadding() is required here: the app draws edge-to-edge
+    // (enableEdgeToEdge() in MainActivity), so without it the keyboard
+    // just overlaps the bottom input row instead of the layout resizing -
+    // you'd be typing but unable to see the input field or what you wrote.
+    Column(modifier = Modifier.fillMaxSize().imePadding()) {
         // Jam Top Header
         Box(
             modifier = Modifier
