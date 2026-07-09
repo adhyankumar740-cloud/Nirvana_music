@@ -7,25 +7,22 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Headphones
-import androidx.compose.material.icons.filled.MarkEmailRead
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -39,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -53,9 +51,8 @@ fun AuthScreen(
     modifier: Modifier = Modifier
 ) {
     val uiState by authViewModel.uiState.collectAsState()
+    val context = LocalContext.current
 
-    var email by remember { mutableStateOf("") }
-    var username by remember { mutableStateOf("") }
     var errorMsg by remember { mutableStateOf("") }
     var visible by remember { mutableStateOf(false) }
 
@@ -63,12 +60,10 @@ fun AuthScreen(
         visible = true
     }
 
-    // Surface Firebase errors (bad email, network issue, expired link...) in
-    // the same inline error slot used for local validation.
+    // Surface sign-in errors (cancelled picker, no Google account, network
+    // issue...) in the same inline error slot.
     LaunchedEffect(uiState) {
-        if (uiState is AuthUiState.Error) {
-            errorMsg = (uiState as AuthUiState.Error).message
-        }
+        errorMsg = (uiState as? AuthUiState.Error)?.message ?: ""
     }
 
     Box(
@@ -136,45 +131,21 @@ fun AuthScreen(
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                when (val state = uiState) {
-                    is AuthUiState.LinkSent -> LinkSentContent(
-                        email = state.email,
-                        onUseDifferentEmail = { authViewModel.dismissError() }
-                    )
-
-                    else -> LoginFormContent(
-                        username = username,
-                        email = email,
-                        errorMsg = errorMsg,
-                        isSending = state is AuthUiState.Sending || state is AuthUiState.Verifying,
-                        onUsernameChange = { username = it; errorMsg = "" },
-                        onEmailChange = { email = it; errorMsg = "" },
-                        onSubmit = {
-                            if (username.trim().isEmpty() || email.trim().isEmpty()) {
-                                errorMsg = "Please fill in all fields"
-                            } else if (!email.contains("@")) {
-                                errorMsg = "Please enter a valid email address"
-                            } else {
-                                errorMsg = ""
-                                authViewModel.sendSignInLink(email.trim(), username.trim())
-                            }
-                        }
-                    )
-                }
+                GoogleSignInContent(
+                    errorMsg = errorMsg,
+                    isLoading = uiState is AuthUiState.Loading,
+                    onSignIn = { authViewModel.signInWithGoogle(context) }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun LoginFormContent(
-    username: String,
-    email: String,
+private fun GoogleSignInContent(
     errorMsg: String,
-    isSending: Boolean,
-    onUsernameChange: (String) -> Unit,
-    onEmailChange: (String) -> Unit,
-    onSubmit: () -> Unit
+    isLoading: Boolean,
+    onSignIn: () -> Unit
 ) {
     Text(
         text = "Welcome Onboard",
@@ -183,143 +154,62 @@ private fun LoginFormContent(
         color = Color.White
     )
     Text(
-        text = "We'll email you a magic link - no password needed",
+        text = "Sign in with your Google account - one tap, no password",
         fontSize = 12.sp,
         color = Color.Gray,
         textAlign = TextAlign.Center,
         modifier = Modifier.padding(top = 4.dp)
     )
-    Spacer(modifier = Modifier.height(24.dp))
-
-    OutlinedTextField(
-        value = username,
-        onValueChange = onUsernameChange,
-        label = { Text("Username") },
-        leadingIcon = {
-            Icon(
-                imageVector = Icons.Default.Person,
-                contentDescription = "Username Icon",
-                tint = MaterialTheme.colorScheme.primary
-            )
-        },
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = MaterialTheme.colorScheme.primary,
-            unfocusedBorderColor = Color.DarkGray,
-            focusedLabelColor = MaterialTheme.colorScheme.primary,
-            unfocusedLabelColor = Color.Gray
-        ),
-        enabled = !isSending,
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("username_input")
-    )
-
-    Spacer(modifier = Modifier.height(16.dp))
-
-    OutlinedTextField(
-        value = email,
-        onValueChange = onEmailChange,
-        label = { Text("Email Address") },
-        leadingIcon = {
-            Icon(
-                imageVector = Icons.Default.Email,
-                contentDescription = "Email Icon",
-                tint = MaterialTheme.colorScheme.primary
-            )
-        },
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = MaterialTheme.colorScheme.primary,
-            unfocusedBorderColor = Color.DarkGray,
-            focusedLabelColor = MaterialTheme.colorScheme.primary,
-            unfocusedLabelColor = Color.Gray
-        ),
-        enabled = !isSending,
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("email_input")
-    )
+    Spacer(modifier = Modifier.height(32.dp))
 
     if (errorMsg.isNotEmpty()) {
-        Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = errorMsg,
             color = MaterialTheme.colorScheme.error,
             fontSize = 12.sp,
-            modifier = Modifier.fillMaxWidth()
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp)
         )
     }
 
-    Spacer(modifier = Modifier.height(24.dp))
-
     Button(
-        onClick = onSubmit,
-        enabled = !isSending,
+        onClick = onSignIn,
+        enabled = !isLoading,
         colors = ButtonDefaults.buttonColors(
-            containerColor = MaterialTheme.colorScheme.primary,
+            containerColor = Color.White,
             contentColor = Color.Black
         ),
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier
             .fillMaxWidth()
             .height(50.dp)
-            .testTag("submit_button")
+            .testTag("google_signin_button")
     ) {
-        if (isSending) {
+        if (isLoading) {
             CircularProgressIndicator(
-                modifier = Modifier.height(20.dp).testTag("sending_indicator"),
+                modifier = Modifier
+                    .height(20.dp)
+                    .testTag("signing_indicator"),
                 color = Color.Black,
                 strokeWidth = 2.dp
             )
         } else {
-            Text(
-                text = "SEND MAGIC LINK",
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.AccountCircle,
+                    contentDescription = null,
+                    tint = Color(0xFF4285F4),
+                    modifier = Modifier.height(22.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Continue with Google",
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp
+                )
+            }
         }
-    }
-}
-
-@Composable
-private fun LinkSentContent(
-    email: String,
-    onUseDifferentEmail: () -> Unit
-) {
-    Icon(
-        imageVector = Icons.Default.MarkEmailRead,
-        contentDescription = "Email sent",
-        tint = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.height(56.dp)
-    )
-    Spacer(modifier = Modifier.height(16.dp))
-    Text(
-        text = "Check your email",
-        fontSize = 20.sp,
-        fontWeight = FontWeight.Bold,
-        color = Color.White
-    )
-    Spacer(modifier = Modifier.height(8.dp))
-    Text(
-        text = "We sent a sign-in link to\n$email",
-        fontSize = 14.sp,
-        color = Color.Gray,
-        textAlign = TextAlign.Center
-    )
-    Spacer(modifier = Modifier.height(4.dp))
-    Text(
-        text = "Open it on this device to log in - no code to type.",
-        fontSize = 12.sp,
-        color = Color.Gray,
-        textAlign = TextAlign.Center
-    )
-    Spacer(modifier = Modifier.height(24.dp))
-    OutlinedButton(
-        onClick = onUseDifferentEmail,
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(46.dp)
-    ) {
-        Text("Use a different email", color = Color.White)
     }
 }
