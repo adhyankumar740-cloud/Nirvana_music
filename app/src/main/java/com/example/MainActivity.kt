@@ -92,10 +92,6 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        // App may have been cold-started by tapping the Firebase sign-in
-        // link emailed to the user (see AndroidManifest App Links filter).
-        authViewModel.handleSignInLink(intent?.data?.toString())
-
         setContent {
             MyApplicationTheme {
                 val isLoggedIn by authViewModel.isLoggedIn.collectAsState()
@@ -112,14 +108,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-    }
-
-    override fun onNewIntent(intent: android.content.Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        // singleTask launchMode means a tap on the sign-in link while the
-        // app is already running arrives here instead of a fresh onCreate.
-        authViewModel.handleSignInLink(intent.data?.toString())
     }
 
     override fun onDestroy() {
