@@ -94,6 +94,36 @@ Jam ab **local simulation nahi hai** — real Firebase Realtime Database use kar
 ### Jaan-boojh kar simplify kiya gaya:
 - Message ka "read receipt" status (SENT/DELIVERED/READ tick icon) abhi hamesha SENT dikhata hai — per-participant read-tracking add nahi ki (low value ke liye bahut zyada Firebase writes hoti, agar chahiye to bata dena, add kar dunga).
 
+## 6b. Email Magic-Link Login — Firebase setup required (100% phone se, 100% free)
+
+Login ab **asli** hai — email daalo, ek "magic link" mail aata hai, use tap karo aur app mein login ho jaata ho. Koi password nahi, koi backend server nahi (sirf Firebase Authentication ka free Spark plan) — matlab pura flow laptop ke bina, phone se hi ho sakta hai.
+
+### Step 1 — Firebase console mein 2 cheezein enable karo
+1. https://console.firebase.google.com pe apna project (`nirvanamusic-75348`) kholo.
+2. **Build → Authentication → Sign-in method** mein jaake:
+   - **Email/Password** provider enable karo.
+   - Usi ke andar **Email link (passwordless sign-in)** bhi enable karo.
+3. Save karo.
+
+### Step 2 — App ka signing fingerprint register karo (App Links ke liye zaroori)
+Email ke andar jo link aata hai, wo tabhi seedha app mein khulega (browser mein nahi) jab Firebase ko pata ho ki ye APK "asli" hai — iske liye app ki signing key ka SHA-1/SHA-256 fingerprint chahiye.
+
+1. Is repo ko GitHub pe push karo (ya "Run workflow" se Actions manually chalao) — jaisa Section 4 mein bataya hai.
+2. Workflow complete hone ke baad, us run ko kholo → **"Generate or restore debug keystore"** aur **"Print debug keystore SHA fingerprints"** step ke logs kholo. Wahan SHA1/SHA256 dikhega, aur pehli baar ek lamba base64 block bhi dikhega.
+3. Us base64 block ko copy karke ek naya repo secret banao: **Settings → Secrets and variables → Actions → New repository secret**, naam `DEBUG_KEYSTORE_BASE64`, value wahi base64. Isse har build mein same keystore/fingerprint use hoga (warna har build pe naya keystore banega aur link kaam karna band kar dega).
+4. Firebase console mein: **Project settings (⚙️) → General tab → neeche apna Android app card → "Add fingerprint"** — dono SHA1 aur SHA256 add karo (2 alag entries).
+
+### Step 3 — Test karo
+1. Naya APK download karo (Actions → Artifacts → `harmonix-debug-apk`), phone pe install karo.
+2. App kholo → username + email daalo → "SEND MAGIC LINK" dabao.
+3. Apna Gmail/email app kholo, Firebase se aayi mail dhoondo (subject kuch aisa: "Sign in to nirvanamusic-75348"), us link ko tap karo.
+4. Link seedha Harmonix app khol dega aur automatically login ho jaayega.
+
+**Agar link tap karne pe browser khul jaaye, app nahi:** iska matlab Step 2 (SHA fingerprint) abhi register nahi hua ya `DEBUG_KEYSTORE_BASE64` set karne ke baad naya build nahi banaya — dobara Step 2 check karo aur ek naya build chalao.
+
+### Jaan-boojh kar simplify kiya gaya:
+- Username sirf display ke liye local profile field hai (SharedPreferences mein), Firebase sirf email verify karta hai — koi separate username uniqueness-check backend nahi hai.
+
 ## 7. YouTube full songs + video Samples — done
 
 **Home Search** ab YouTube Data API v3 use karta hai (`YouTubeService.kt`) — search karke real duration ke saath full song results deta hai. Tap karke play karo to woh **YouTube ke official chhote embedded player** (WebView, bottom-right corner, ~72dp) mein bajta hai — sirf tab visible/mounted hota hai jab koi YouTube track active ho. Yeh isliye kyunki YouTube Data API sirf metadata deta hai, direct stream URL nahi — aur stream extract karke apne player mein daalna YouTube ke ToS ke against hai, isliye official chhota visible player use kiya (aapne yehi option choose kiya tha).
