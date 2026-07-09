@@ -16,16 +16,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ui.viewmodel.AuthUiState
 import com.example.ui.viewmodel.AuthViewModel
 
 @Composable
@@ -47,6 +52,8 @@ fun AuthScreen(
     authViewModel: AuthViewModel,
     modifier: Modifier = Modifier
 ) {
+    val uiState by authViewModel.uiState.collectAsState()
+
     var email by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
     var errorMsg by remember { mutableStateOf("") }
@@ -54,6 +61,14 @@ fun AuthScreen(
 
     LaunchedEffect(Unit) {
         visible = true
+    }
+
+    // Surface Firebase errors (bad email, network issue, expired link...) in
+    // the same inline error slot used for local validation.
+    LaunchedEffect(uiState) {
+        if (uiState is AuthUiState.Error) {
+            errorMsg = (uiState as AuthUiState.Error).message
+        }
     }
 
     Box(
@@ -121,105 +136,190 @@ fun AuthScreen(
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = "Welcome Onboard",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                Spacer(modifier = Modifier.height(24.dp))
-
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = {
-                        username = it
-                        errorMsg = ""
-                    },
-                    label = { Text("Username") },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.Person,
-                            contentDescription = "Username Icon",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = Color.DarkGray,
-                        focusedLabelColor = MaterialTheme.colorScheme.primary,
-                        unfocusedLabelColor = Color.Gray
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("username_input")
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                OutlinedTextField(
-                    value = email,
-                    onValueChange = {
-                        email = it
-                        errorMsg = ""
-                    },
-                    label = { Text("Email Address") },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.Email,
-                            contentDescription = "Email Icon",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = Color.DarkGray,
-                        focusedLabelColor = MaterialTheme.colorScheme.primary,
-                        unfocusedLabelColor = Color.Gray
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("email_input")
-                )
-
-                if (errorMsg.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = errorMsg,
-                        color = MaterialTheme.colorScheme.error,
-                        fontSize = 12.sp,
-                        modifier = Modifier.fillMaxWidth()
+                when (val state = uiState) {
+                    is AuthUiState.LinkSent -> LinkSentContent(
+                        email = state.email,
+                        onUseDifferentEmail = { authViewModel.dismissError() }
                     )
-                }
 
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Button(
-                    onClick = {
-                        if (username.trim().isEmpty() || email.trim().isEmpty()) {
-                            errorMsg = "Please fill in all fields"
-                        } else if (!email.contains("@")) {
-                            errorMsg = "Please enter a valid email address"
-                        } else {
-                            authViewModel.login(email.trim(), username.trim())
+                    else -> LoginFormContent(
+                        username = username,
+                        email = email,
+                        errorMsg = errorMsg,
+                        isSending = state is AuthUiState.Sending || state is AuthUiState.Verifying,
+                        onUsernameChange = { username = it; errorMsg = "" },
+                        onEmailChange = { email = it; errorMsg = "" },
+                        onSubmit = {
+                            if (username.trim().isEmpty() || email.trim().isEmpty()) {
+                                errorMsg = "Please fill in all fields"
+                            } else if (!email.contains("@")) {
+                                errorMsg = "Please enter a valid email address"
+                            } else {
+                                errorMsg = ""
+                                authViewModel.sendSignInLink(email.trim(), username.trim())
+                            }
                         }
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = Color.Black
-                    ),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp)
-                        .testTag("submit_button")
-                ) {
-                    Text(
-                        text = "GET STARTED",
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 2.sp
                     )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun LoginFormContent(
+    username: String,
+    email: String,
+    errorMsg: String,
+    isSending: Boolean,
+    onUsernameChange: (String) -> Unit,
+    onEmailChange: (String) -> Unit,
+    onSubmit: () -> Unit
+) {
+    Text(
+        text = "Welcome Onboard",
+        fontSize = 20.sp,
+        fontWeight = FontWeight.Bold,
+        color = Color.White
+    )
+    Text(
+        text = "We'll email you a magic link - no password needed",
+        fontSize = 12.sp,
+        color = Color.Gray,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+    Spacer(modifier = Modifier.height(24.dp))
+
+    OutlinedTextField(
+        value = username,
+        onValueChange = onUsernameChange,
+        label = { Text("Username") },
+        leadingIcon = {
+            Icon(
+                imageVector = Icons.Default.Person,
+                contentDescription = "Username Icon",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = MaterialTheme.colorScheme.primary,
+            unfocusedBorderColor = Color.DarkGray,
+            focusedLabelColor = MaterialTheme.colorScheme.primary,
+            unfocusedLabelColor = Color.Gray
+        ),
+        enabled = !isSending,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("username_input")
+    )
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    OutlinedTextField(
+        value = email,
+        onValueChange = onEmailChange,
+        label = { Text("Email Address") },
+        leadingIcon = {
+            Icon(
+                imageVector = Icons.Default.Email,
+                contentDescription = "Email Icon",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = MaterialTheme.colorScheme.primary,
+            unfocusedBorderColor = Color.DarkGray,
+            focusedLabelColor = MaterialTheme.colorScheme.primary,
+            unfocusedLabelColor = Color.Gray
+        ),
+        enabled = !isSending,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("email_input")
+    )
+
+    if (errorMsg.isNotEmpty()) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = errorMsg,
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 12.sp,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+
+    Spacer(modifier = Modifier.height(24.dp))
+
+    Button(
+        onClick = onSubmit,
+        enabled = !isSending,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = Color.Black
+        ),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(50.dp)
+            .testTag("submit_button")
+    ) {
+        if (isSending) {
+            CircularProgressIndicator(
+                modifier = Modifier.height(20.dp).testTag("sending_indicator"),
+                color = Color.Black,
+                strokeWidth = 2.dp
+            )
+        } else {
+            Text(
+                text = "SEND MAGIC LINK",
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun LinkSentContent(
+    email: String,
+    onUseDifferentEmail: () -> Unit
+) {
+    Icon(
+        imageVector = Icons.Default.MarkEmailRead,
+        contentDescription = "Email sent",
+        tint = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.height(56.dp)
+    )
+    Spacer(modifier = Modifier.height(16.dp))
+    Text(
+        text = "Check your email",
+        fontSize = 20.sp,
+        fontWeight = FontWeight.Bold,
+        color = Color.White
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        text = "We sent a sign-in link to\n$email",
+        fontSize = 14.sp,
+        color = Color.Gray,
+        textAlign = TextAlign.Center
+    )
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+        text = "Open it on this device to log in - no code to type.",
+        fontSize = 12.sp,
+        color = Color.Gray,
+        textAlign = TextAlign.Center
+    )
+    Spacer(modifier = Modifier.height(24.dp))
+    OutlinedButton(
+        onClick = onUseDifferentEmail,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(46.dp)
+    ) {
+        Text("Use a different email", color = Color.White)
     }
 }
