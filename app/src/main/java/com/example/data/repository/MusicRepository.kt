@@ -10,6 +10,9 @@ import com.example.data.network.ITunesService
 import com.example.data.network.LrcLibService
 import com.example.data.network.YouTubeService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -63,11 +66,38 @@ class MusicRepository(
             emit(samplesCache)
         }
 
+        // A single fixed search term against the `musicVideo` entity very often
+        // resolves to just one (or zero) results that actually have a non-null
+        // preview URL - iTunes' musicVideo catalog is sparse and most entries
+        // lack a preview clip. That produced a Samples feed with only one page,
+        // which looked like "swiping/scrolling doesn't work" (there was nothing
+        // to scroll to) even though tap-to-toggle-play still worked fine on that
+        // single item. Fetching several varied terms in parallel and merging the
+        // results gives the pager a real multi-page feed to swipe through.
+        val searchTerms = if (term == "top hit" || term == "trending hit") {
+            listOf("pop hits", "hip hop", "dance music", "top 40", "rock hits", "trending music", "viral songs", "rnb hits")
+        } else {
+            listOf(term)
+        }
+
         try {
-            val response = apiService.search(term = term, media = "musicVideo", entity = "musicVideo", limit = 40)
-            val tracks = response.results
+            val results = coroutineScope {
+                searchTerms.map { t ->
+                    async {
+                        try {
+                            apiService.search(term = t, media = "musicVideo", entity = "musicVideo", limit = 40).results
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
+                    }
+                }.awaitAll()
+            }.flatten()
+
+            val tracks = results
                 .filter { !it.previewUrl.isNullOrEmpty() }
                 .map { it.toTrack(isVideo = true) }
+                .distinctBy { it.id }
+                .shuffled()
 
             val enrichedTracks = tracks.map { track ->
                 val localEntity = savedTrackDao.getSavedTrackById(track.id)
@@ -77,7 +107,7 @@ class MusicRepository(
                 )
             }
 
-            if (term == "top hit") {
+            if (term == "top hit" || term == "trending hit") {
                 samplesCache.clear()
                 samplesCache.addAll(enrichedTracks)
             }
