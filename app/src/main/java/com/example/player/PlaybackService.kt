@@ -32,7 +32,6 @@ class PlaybackService : MediaSessionService() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val session = mediaSession ?: return super.onTaskRemoved(rootIntent)
-        
         if (!session.player.playWhenReady || session.player.mediaItemCount == 0) {
             stopSelf()
         }
