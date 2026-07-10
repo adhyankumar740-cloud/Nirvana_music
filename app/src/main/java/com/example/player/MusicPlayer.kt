@@ -121,10 +121,13 @@ class MusicPlayer(private val context: Context) {
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlayingNow: Boolean) {
-            if (_currentTrack.value?.source != TrackSource.ITUNES) return
             _isPlaying.value = isPlayingNow
-            
             if (isPlayingNow) startProgressTracker() else stopProgressTracker()
+
+            if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
+                if (isPlayingNow) youtubeBridge?.play() else youtubeBridge?.pause()
+            }
+
             if (suppressNextPlayPauseBroadcast) {
                 suppressNextPlayPauseBroadcast = false
             } else {
@@ -142,6 +145,20 @@ class MusicPlayer(private val context: Context) {
                 }
                 Player.STATE_ENDED -> handleTrackEnded()
                 else -> {}
+            }
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int
+        ) {
+            // Control centre seek bar drag handling for YouTube tracks
+            if (reason == Player.DISCONTINUITY_REASON_SEEK && _currentTrack.value?.source == TrackSource.YOUTUBE) {
+                val targetSeekMs = newPosition.positionMs
+                _playbackPosition.value = targetSeekMs
+                youtubeBridge?.seekTo(targetSeekMs / 1000f)
+                if (!isApplyingRemote) onLocalSeek?.invoke(targetSeekMs)
             }
         }
     }
@@ -336,23 +353,39 @@ class MusicPlayer(private val context: Context) {
     }
 
     private fun playYoutubeTrack(track: Track) {
-        val videoId = track.youtubeVideoId
-        if (videoId.isNullOrBlank()) {
-            Log.e("MusicPlayer", "YouTube track missing videoId: ${track.title}")
-            return
-        }
-        runOnController { it.pause() }
+        cancelBufferingWatchdog()
         _currentTrack.value = track
         if (!isApplyingRemote) onLocalSongChange?.invoke(track)
+        
         _isBuffering.value = true
         _isPlaying.value = false
         _playbackPosition.value = 0L
         _duration.value = track.durationMs
         hasReachedPlayingState = false
         _playbackError.value = null
-        loadedYoutubeVideoId = videoId
-        youtubeBridge?.loadVideo(videoId)
-        startBufferingWatchdog(videoId)
+        loadedYoutubeVideoId = track.youtubeVideoId
+        
+        // INSTANT LOAD FOR SYSTEM TRAY: Koi local asset URI nahi daalenge jo delay kare
+        runOnController { controller ->
+            val metadata = MediaMetadata.Builder()
+                .setTitle(track.title)
+                .setArtist(track.artist ?: "YouTube Stream")
+                .build()
+
+            // Bina kisi playback resource ke sirf stream tracking define karenge
+            val fastMediaItem = MediaItem.Builder()
+                .setMediaId("yt_${track.id}")
+                .setMediaMetadata(metadata)
+                .build()
+
+            controller.setMediaItem(fastMediaItem)
+            // Prepare ko block nahi karenge taaki background queue instant execute ho ske
+        }
+
+        track.youtubeVideoId?.let { videoId ->
+            youtubeBridge?.loadVideo(videoId)
+            startBufferingWatchdog(videoId)
+        }
     }
 
     private fun startBufferingWatchdog(videoId: String) {
@@ -360,7 +393,6 @@ class MusicPlayer(private val context: Context) {
         bufferingWatchdogJob = scope.launch {
             delay(bufferingTimeoutMs)
             if (loadedYoutubeVideoId == videoId && _isBuffering.value && !hasReachedPlayingState) {
-                Log.e("MusicPlayer", "Buffering timed out for videoId=$videoId - treating as failed playback")
                 _isBuffering.value = false
                 registerPlaybackFailureAndMaybeStop()
             }
@@ -375,6 +407,7 @@ class MusicPlayer(private val context: Context) {
     fun pause() {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
             youtubeBridge?.pause()
+            _isPlaying.value = false
         } else {
             runOnController { it.pause() }
         }
@@ -383,6 +416,7 @@ class MusicPlayer(private val context: Context) {
     fun resume() {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
             youtubeBridge?.play()
+            _isPlaying.value = true
         } else {
             runOnController { it.play() }
         }
@@ -419,23 +453,25 @@ class MusicPlayer(private val context: Context) {
         if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
         if (videoId != loadedYoutubeVideoId) return
         when (state) {
-            1 -> { 
+            1 -> { // PLAYING STATE
                 _isPlaying.value = true
                 _isBuffering.value = false
                 hasReachedPlayingState = true
                 consecutivePlaybackFailures = 0
                 cancelBufferingWatchdog()
+                startProgressTracker()
                 if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
                 else onLocalPlayPause?.invoke(true, (currentTimeSec * 1000).toLong())
             }
-            2 -> { 
+            2 -> { // PAUSED STATE
                 _isPlaying.value = false
                 _isBuffering.value = false
+                stopProgressTracker()
                 if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
                 else onLocalPlayPause?.invoke(false, (currentTimeSec * 1000).toLong())
             }
-            3 -> _isBuffering.value = true
-            0 -> { cancelBufferingWatchdog(); handleTrackEnded() }
+            3 -> _isBuffering.value = true // BUFFERING
+            0 -> { cancelBufferingWatchdog(); handleTrackEnded() } // ENDED
         }
         if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
     }
@@ -443,14 +479,14 @@ class MusicPlayer(private val context: Context) {
     fun onYoutubeTimeUpdate(currentTimeSec: Double, durationSec: Double, videoId: String) {
         if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
         if (videoId != loadedYoutubeVideoId) return
-        _playbackPosition.value = (currentTimeSec * 1000).toLong()
+        val currentMs = (currentTimeSec * 1000).toLong()
+        _playbackPosition.value = currentMs
         if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
     }
 
     fun onYoutubePlayerError(errorCode: Int, videoId: String) {
         if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
         if (videoId != loadedYoutubeVideoId) return
-        Log.e("MusicPlayer", "YouTube playback error $errorCode for '${_currentTrack.value?.title}' - skipping")
         cancelBufferingWatchdog()
         _isBuffering.value = false
         _isPlaying.value = false
@@ -495,6 +531,7 @@ class MusicPlayer(private val context: Context) {
                         if (it.isPlaying) _playbackPosition.value = it.currentPosition.coerceAtLeast(0L)
                     }
                 }
+                // Fast updates keep seek bar moving flawlessly without locking up the CPU
                 delay(1000)
             }
         }
