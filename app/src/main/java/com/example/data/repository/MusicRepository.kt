@@ -1,7 +1,11 @@
 package com.example.data.repository
 
+import com.example.data.database.PlayHistoryDao
+import com.example.data.database.PlayHistoryEntity
 import com.example.data.database.SavedTrackDao
 import com.example.data.database.SavedTrackEntity
+import com.example.data.database.SearchHistoryDao
+import com.example.data.database.SearchHistoryEntity
 import com.example.data.model.Lyrics
 import com.example.data.model.Track
 import com.example.data.model.parseSyncedLyrics
@@ -32,12 +36,28 @@ sealed class SearchOutcome {
     data class Error(val message: String) : SearchOutcome()
 }
 
+/**
+ * Snapshot of what the user seems to like, derived from their search and
+ * listening history. Genres/artists/queries are ordered most-preferred first
+ * (frequency, then recency). Empty when there isn't enough history yet, so
+ * callers can fall back to the app's generic defaults for a brand-new user.
+ */
+data class PersonalizationProfile(
+    val topGenres: List<String>,
+    val topArtists: List<String>,
+    val topSearchQueries: List<String>
+) {
+    val isEmpty: Boolean get() = topGenres.isEmpty() && topArtists.isEmpty() && topSearchQueries.isEmpty()
+}
+
 class MusicRepository(
     private val apiService: ITunesService,
     private val youtubeService: YouTubeService,
     private val youtubeApiKey: String,
     private val lrcLibService: LrcLibService,
-    private val savedTrackDao: SavedTrackDao
+    private val savedTrackDao: SavedTrackDao,
+    private val searchHistoryDao: SearchHistoryDao,
+    private val playHistoryDao: PlayHistoryDao
 ) {
     // Cache for Samples feed to ensure instant load times
     private val samplesCache = mutableListOf<Track>()
@@ -54,6 +74,34 @@ class MusicRepository(
     // iTunes title+artist lookup per track id so "same genre" autoplay has a
     // real genre to work with instead of silently degrading to "same artist".
     private val resolvedGenreCache = mutableMapOf<Long, String>()
+
+    /**
+     * Builds a [PersonalizationProfile] from the user's own search + listening
+     * history (never anyone else's - this is purely local/on-device Room data).
+     * Cheap enough to call on every Home/Samples load: a handful of indexed
+     * GROUP BY queries over a capped window of recent rows.
+     */
+    private suspend fun getPersonalizationProfile(): PersonalizationProfile = withContext(Dispatchers.IO) {
+        val genres = playHistoryDao.getTopGenres(3).map { it.value }
+        val artists = playHistoryDao.getTopArtists(3).map { it.value }
+        val queries = searchHistoryDao.getTopQueries(3).map { it.value }
+        PersonalizationProfile(genres, artists, queries)
+    }
+
+    /** Call whenever the user runs a real (debounced, non-blank) search. */
+    suspend fun recordSearchQuery(query: String) = withContext(Dispatchers.IO) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return@withContext
+        searchHistoryDao.insertQuery(SearchHistoryEntity(query = trimmed))
+    }
+
+    /** Call whenever a track actually starts playing, to feed listening-history-based recommendations. */
+    suspend fun recordTrackPlayed(track: Track) = withContext(Dispatchers.IO) {
+        val genre = resolveGenre(track)
+        playHistoryDao.insertPlay(
+            PlayHistoryEntity(trackId = track.id, title = track.title, artist = track.artist, genre = genre)
+        )
+    }
 
     /**
      * Samples feed - iTunes `musicVideo` entity, which (unlike the plain "song" entity)
@@ -75,7 +123,20 @@ class MusicRepository(
         // single item. Fetching several varied terms in parallel and merging the
         // results gives the pager a real multi-page feed to swipe through.
         val searchTerms = if (term == "top hit" || term == "trending hit") {
-            listOf("pop hits", "hip hop", "dance music", "top 40", "rock hits", "trending music", "viral songs", "rnb hits")
+            // Personalization: put the user's own top genres/artists (from
+            // listening + search history) at the front of the term pool, ahead
+            // of the generic defaults, so their swipe feed skews toward what
+            // they actually listen to rather than being purely generic charts.
+            // Defaults are always kept too (both as a fallback for brand-new
+            // users with no history yet, and to preserve variety/discovery).
+            val profile = getPersonalizationProfile()
+            val personalizedTerms = (
+                profile.topGenres.map { "$it music video" } +
+                profile.topArtists.map { "$it" } +
+                profile.topSearchQueries
+            ).distinct().take(5)
+            val defaultTerms = listOf("pop hits", "hip hop", "dance music", "top 40", "rock hits", "trending music", "viral songs", "rnb hits")
+            (personalizedTerms + defaultTerms).distinct()
         } else {
             listOf(term)
         }
@@ -123,15 +184,45 @@ class MusicRepository(
     }.flowOn(Dispatchers.IO)
 
     /**
-     * Home screen's default (pre-search) recommendation row - kept on the original
-     * iTunes song search so it's unaffected by the Samples/Search changes above.
+     * Home screen's default (pre-search) recommendation row. When [personalize]
+     * is true (the normal Home-screen call) and the user has enough search/
+     * listening history, this fans out across their top genres, top artists,
+     * and top search queries instead of one fixed "chill lofi" search - so the
+     * row reflects what they actually search for and listen to. Brand-new
+     * users with no history yet (or an explicit [term] override) still get the
+     * original single-query behaviour.
      */
-    fun getHomeFeaturedTracks(term: String = "chill lofi"): Flow<List<Track>> = flow {
+    fun getHomeFeaturedTracks(term: String = "chill lofi", personalize: Boolean = true): Flow<List<Track>> = flow {
         try {
-            val response = apiService.search(term = term, media = "music", entity = "song", limit = 30)
-            val tracks = response.results
+            val profile = if (personalize) getPersonalizationProfile() else PersonalizationProfile(emptyList(), emptyList(), emptyList())
+            val terms = if (!profile.isEmpty) {
+                (
+                    profile.topGenres.map { "$it hits" } +
+                    profile.topArtists.map { "$it" } +
+                    profile.topSearchQueries
+                ).distinct().take(5)
+            } else {
+                listOf(term)
+            }
+
+            val results = coroutineScope {
+                terms.map { t ->
+                    async {
+                        try {
+                            apiService.search(term = t, media = "music", entity = "song", limit = 20).results
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
+                    }
+                }.awaitAll()
+            }.flatten()
+
+            val tracks = results
                 .filter { !it.previewUrl.isNullOrEmpty() }
                 .map { it.toTrack() }
+                .distinctBy { it.id }
+                .let { if (terms.size > 1) it.shuffled() else it }
+
             val enriched = tracks.map { track ->
                 val localEntity = savedTrackDao.getSavedTrackById(track.id)
                 track.copy(
@@ -280,9 +371,18 @@ class MusicRepository(
             val genre = resolveGenre(currentTrack)
             val excludeKeys = (recentTracks + currentTrack).map { normalizedSongKey(it) }.toSet()
 
-            // Genre first (a different song, same vibe); artist queries are only
-            // a fallback for when the genre search comes back empty.
-            val queries = listOf(
+            // Genre is a hard requirement for Auto-Next, so every query below is
+            // genre-qualified - "style" match is never traded away for personalization.
+            // What history *does* influence is which genre-matching song gets picked:
+            // if the user has a favorite artist (from search/listening history) who
+            // also fits this genre, that artist's genre-matching songs are tried first,
+            // ahead of the generic "$genre songs" search.
+            val profile = getPersonalizationProfile()
+            val favoriteArtistInGenre = profile.topArtists
+                .firstOrNull { it.isNotBlank() && !it.equals(currentTrack.artist, ignoreCase = true) }
+
+            val queries = listOfNotNull(
+                favoriteArtistInGenre?.let { "$it $genre".trim() },
                 "$genre songs".trim(),
                 "${currentTrack.artist} $genre".trim(),
                 currentTrack.artist
