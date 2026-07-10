@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -499,6 +500,10 @@ fun AddToPlaylistDialog(
 ) {
     val playlists by playlistViewModel.playlists.collectAsState()
     var showCreateDialog by remember { mutableStateOf(false) }
+    // Tap par turant "Added" dikhane ke liye local state - pehle koi feedback
+    // nahi tha toh tap karne pe kuch hota hua dikhta hi nahi tha, even though
+    // the track was actually being added in the background.
+    var addedPlaylistIds by remember { mutableStateOf(setOf<Long>()) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -509,16 +514,27 @@ fun AddToPlaylistDialog(
             } else {
                 Column {
                     playlists.forEach { playlist ->
+                        val isAdded = playlist.id in addedPlaylistIds
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { playlistViewModel.addTrackToPlaylist(playlist.id, track) }
+                                .clickable(enabled = !isAdded) {
+                                    playlistViewModel.addTrackToPlaylist(playlist.id, track)
+                                    addedPlaylistIds = addedPlaylistIds + playlist.id
+                                }
                                 .padding(vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.QueueMusic, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Icon(
+                                if (isAdded) Icons.Default.Check else Icons.Default.QueueMusic,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
                             Spacer(modifier = Modifier.width(12.dp))
                             Text(playlist.name, color = Color.White, modifier = Modifier.weight(1f))
+                            if (isAdded) {
+                                Text("Added", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+                            }
                         }
                     }
                 }
@@ -540,7 +556,10 @@ fun AddToPlaylistDialog(
         CreatePlaylistDialog(
             onDismiss = { showCreateDialog = false },
             onCreate = { name ->
-                playlistViewModel.createPlaylist(name) { id -> playlistViewModel.addTrackToPlaylist(id, track) }
+                playlistViewModel.createPlaylist(name) { id ->
+                    playlistViewModel.addTrackToPlaylist(id, track)
+                    addedPlaylistIds = addedPlaylistIds + id
+                }
                 showCreateDialog = false
             }
         )
