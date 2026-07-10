@@ -44,11 +44,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.viewmodel.AuthViewModel
 import com.example.ui.viewmodel.MusicViewModel
+import com.example.ui.viewmodel.PlaylistViewModel
 
 @Composable
 fun LibraryScreen(
     musicViewModel: MusicViewModel,
     authViewModel: AuthViewModel,
+    playlistViewModel: PlaylistViewModel,
     modifier: Modifier = Modifier
 ) {
     val username by authViewModel.username.collectAsState()
@@ -130,7 +132,7 @@ fun LibraryScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                listOf("Favorites", "Downloads").forEach { tab ->
+                listOf("Favorites", "Downloads", "Playlists").forEach { tab ->
                     val isSelected = tab == activeTab
                     Box(
                         modifier = Modifier
@@ -145,14 +147,22 @@ fun LibraryScreen(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = if (tab == "Favorites") Icons.Default.Favorite else Icons.Default.DownloadDone,
+                                imageVector = when (tab) {
+                                    "Favorites" -> Icons.Default.Favorite
+                                    "Downloads" -> Icons.Default.DownloadDone
+                                    else -> Icons.Default.QueueMusic
+                                },
                                 contentDescription = "$tab Tab Icon",
                                 tint = if (isSelected) Color.Black else Color.Gray,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "$tab (${if (tab == "Favorites") favorites.size else downloads.size})",
+                                text = when (tab) {
+                                    "Favorites" -> "Favorites (${favorites.size})"
+                                    "Downloads" -> "Downloads (${downloads.size})"
+                                    else -> "Playlists"
+                                },
                                 color = if (isSelected) Color.Black else Color.White,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp
@@ -165,51 +175,58 @@ fun LibraryScreen(
             Spacer(modifier = Modifier.height(20.dp))
 
             // Tab contents
-            val currentList = if (activeTab == "Favorites") favorites else downloads
-
-            if (currentList.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = if (activeTab == "Favorites") Icons.Default.Favorite else Icons.Default.MusicNote,
-                            contentDescription = "Empty list icon",
-                            tint = Color.DarkGray,
-                            modifier = Modifier.size(64.dp)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "No songs found in $activeTab",
-                            color = Color.Gray,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Mark songs as favorite or download on Home",
-                            color = Color.DarkGray,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
-                }
+            if (activeTab == "Playlists") {
+                PlaylistScreen(
+                    playlistViewModel = playlistViewModel,
+                    modifier = Modifier.fillMaxWidth().weight(1f)
+                )
             } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(currentList) { track ->
-                        TrackRow(
-                            track = track,
-                            onPlayClick = { musicViewModel.playTrack(track, currentList) },
-                            onFavoriteClick = { musicViewModel.toggleFavorite(track) },
-                            onDownloadClick = { musicViewModel.toggleDownload(track) }
-                        )
+                val currentList = if (activeTab == "Favorites") favorites else downloads
+
+                if (currentList.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = if (activeTab == "Favorites") Icons.Default.Favorite else Icons.Default.MusicNote,
+                                contentDescription = "Empty list icon",
+                                tint = Color.DarkGray,
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "No songs found in $activeTab",
+                                color = Color.Gray,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Mark songs as favorite or download on Home",
+                                color = Color.DarkGray,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(currentList) { track ->
+                            TrackRow(
+                                track = track,
+                                onPlayClick = { musicViewModel.playTrack(track, currentList) },
+                                onFavoriteClick = { musicViewModel.toggleFavorite(track) },
+                                onDownloadClick = { musicViewModel.toggleDownload(track) }
+                            )
+                        }
                     }
                 }
             }
