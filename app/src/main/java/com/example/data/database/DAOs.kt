@@ -27,6 +27,73 @@ interface SavedTrackDao {
     suspend fun getSavedTrackById(id: Long): SavedTrackEntity?
 }
 
+/** Row shape for "top N distinct values by frequency, most recent first as tiebreak" aggregate queries. */
+data class ValueCount(val value: String, val count: Int)
+
+@Dao
+interface SearchHistoryDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertQuery(entry: SearchHistoryEntity)
+
+    @Query("SELECT * FROM search_history ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecentQueries(limit: Int = 50): List<SearchHistoryEntity>
+
+    // Most-searched terms, ranked by frequency then recency. Capped to the
+    // last 200 searches so old, no-longer-relevant interests fade out over time.
+    @Query(
+        """
+        SELECT query AS value, COUNT(*) AS count FROM (
+            SELECT query, timestamp FROM search_history ORDER BY timestamp DESC LIMIT 200
+        )
+        GROUP BY query
+        ORDER BY count DESC, MAX(timestamp) DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getTopQueries(limit: Int = 5): List<ValueCount>
+
+    @Query("DELETE FROM search_history")
+    suspend fun clearSearchHistory()
+}
+
+@Dao
+interface PlayHistoryDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertPlay(entry: PlayHistoryEntity)
+
+    @Query("SELECT * FROM play_history ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecentPlays(limit: Int = 50): List<PlayHistoryEntity>
+
+    // Top genres by listen frequency, capped to the last 300 plays so taste
+    // can drift over time instead of being locked in by old listening habits.
+    @Query(
+        """
+        SELECT genre AS value, COUNT(*) AS count FROM (
+            SELECT genre, timestamp FROM play_history WHERE genre != 'Music' ORDER BY timestamp DESC LIMIT 300
+        )
+        GROUP BY genre
+        ORDER BY count DESC, MAX(timestamp) DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getTopGenres(limit: Int = 5): List<ValueCount>
+
+    @Query(
+        """
+        SELECT artist AS value, COUNT(*) AS count FROM (
+            SELECT artist, timestamp FROM play_history ORDER BY timestamp DESC LIMIT 300
+        )
+        GROUP BY artist
+        ORDER BY count DESC, MAX(timestamp) DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getTopArtists(limit: Int = 5): List<ValueCount>
+
+    @Query("DELETE FROM play_history")
+    suspend fun clearPlayHistory()
+}
+
 @Dao
 interface ChatMessageDao {
     @Query("SELECT * FROM chat_messages WHERE jamId = :jamId ORDER BY timestamp ASC")
