@@ -23,6 +23,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -134,7 +135,8 @@ fun AuthScreen(
                 GoogleSignInContent(
                     errorMsg = errorMsg,
                     isLoading = uiState is AuthUiState.Loading,
-                    onSignIn = { authViewModel.signInWithGoogle(context) }
+                    onSignIn = { authViewModel.signInWithGoogle(context) },
+                    onGuestLogin = { authViewModel.loginAsGuest() }
                 )
             }
         }
@@ -145,7 +147,8 @@ fun AuthScreen(
 private fun GoogleSignInContent(
     errorMsg: String,
     isLoading: Boolean,
-    onSignIn: () -> Unit
+    onSignIn: () -> Unit,
+    onGuestLogin: () -> Unit
 ) {
     Text(
         text = "Welcome Onboard",
@@ -211,5 +214,29 @@ private fun GoogleSignInContent(
                 )
             }
         }
+    }
+
+    Spacer(modifier = Modifier.height(14.dp))
+
+    OutlinedButton(
+        onClick = onGuestLogin,
+        enabled = !isLoading,
+        colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = Color.Gray
+        ),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(50.dp)
+            .testTag("guest_login_button")
+    ) {
+        Icon(
+            imageVector = Icons.Default.AccountCircle,
+            contentDescription = null,
+            tint = Color.Gray,
+            modifier = Modifier.height(20.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(text = "Continue as Guest", fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
     }
 }
