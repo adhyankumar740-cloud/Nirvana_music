@@ -36,7 +36,9 @@ class AppContainer(private val context: Context) {
             youtubeService = youtubeService,
             youtubeApiKey = BuildConfig.YOUTUBE_API_KEY,
             lrcLibService = lrcLibService,
-            savedTrackDao = database.savedTrackDao()
+            savedTrackDao = database.savedTrackDao(),
+            searchHistoryDao = database.searchHistoryDao(),
+            playHistoryDao = database.playHistoryDao()
         )
     }
 
