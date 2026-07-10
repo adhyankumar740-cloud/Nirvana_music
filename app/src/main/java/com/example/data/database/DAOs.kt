@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -92,6 +93,54 @@ interface PlayHistoryDao {
 
     @Query("DELETE FROM play_history")
     suspend fun clearPlayHistory()
+}
+
+/** Row shape for "how many tracks does each playlist have" aggregate query. */
+data class PlaylistTrackCount(val playlistId: Long, val count: Int)
+
+@Dao
+interface PlaylistDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertPlaylist(playlist: PlaylistEntity): Long
+
+    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    fun getAllPlaylists(): Flow<List<PlaylistEntity>>
+
+    @Query("SELECT * FROM playlists WHERE id = :id LIMIT 1")
+    suspend fun getPlaylistById(id: Long): PlaylistEntity?
+
+    @Query("UPDATE playlists SET name = :name WHERE id = :id")
+    suspend fun renamePlaylist(id: Long, name: String)
+
+    @Query("SELECT playlistId, COUNT(*) AS count FROM playlist_tracks GROUP BY playlistId")
+    fun getTrackCounts(): Flow<List<PlaylistTrackCount>>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertPlaylistTrack(track: PlaylistTrackEntity)
+
+    @Query("SELECT * FROM playlist_tracks WHERE playlistId = :playlistId ORDER BY addedAt ASC")
+    fun getTracksForPlaylist(playlistId: Long): Flow<List<PlaylistTrackEntity>>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM playlist_tracks WHERE playlistId = :playlistId AND trackId = :trackId)")
+    suspend fun isTrackInPlaylist(playlistId: Long, trackId: Long): Boolean
+
+    @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId AND trackId = :trackId")
+    suspend fun deletePlaylistTrack(playlistId: Long, trackId: Long)
+
+    @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId")
+    suspend fun deleteAllTracksForPlaylist(playlistId: Long)
+
+    @Query("DELETE FROM playlists WHERE id = :id")
+    suspend fun deletePlaylistRow(id: Long)
+
+    // Room (Kotlin default-method) transaction: deleting a playlist must also
+    // delete its tracks, or orphaned playlist_tracks rows would pile up and
+    // (if a new playlist ever reused the same id) resurface as "ghost" tracks.
+    @Transaction
+    suspend fun deletePlaylist(id: Long) {
+        deleteAllTracksForPlaylist(id)
+        deletePlaylistRow(id)
+    }
 }
 
 @Dao
