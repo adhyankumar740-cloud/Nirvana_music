@@ -21,7 +21,7 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         player = ExoPlayer.Builder(this)
-            .setAudioAttributes(audioAttributes, true)
+            .setAudioAttributes(audioAttributes, false) // silent track hai, isko audio focus fight karne ki zaroorat nahi
             .setHandleAudioBecomingNoisy(true)
             .build()
 
