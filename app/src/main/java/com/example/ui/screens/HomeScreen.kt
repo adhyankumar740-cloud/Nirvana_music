@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -64,12 +65,14 @@ import coil.compose.AsyncImage
 import com.example.data.model.Track
 import com.example.ui.viewmodel.AuthViewModel
 import com.example.ui.viewmodel.MusicViewModel
+import com.example.ui.viewmodel.PlaylistViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     musicViewModel: MusicViewModel,
     authViewModel: AuthViewModel,
+    playlistViewModel: PlaylistViewModel,
     modifier: Modifier = Modifier
 ) {
     val username by authViewModel.username.collectAsState()
@@ -87,6 +90,7 @@ fun HomeScreen(
 
     var showPlayerDetail by remember { mutableStateOf(false) }
     var selectedCategory by remember { mutableStateOf("Chill") }
+    var trackPendingPlaylistAdd by remember { mutableStateOf<Track?>(null) }
 
     val categories = listOf("Chill", "Pop", "Lo-Fi", "Electronic", "Alternative")
 
@@ -230,7 +234,8 @@ fun HomeScreen(
                                 track = track,
                                 onPlayClick = { musicViewModel.playTrack(track, homeTracks) },
                                 onFavoriteClick = { musicViewModel.toggleFavorite(track) },
-                                onDownloadClick = { musicViewModel.toggleDownload(track) }
+                                onDownloadClick = { musicViewModel.toggleDownload(track) },
+                                onAddToPlaylistClick = { trackPendingPlaylistAdd = track }
                             )
                         }
                     }
@@ -285,7 +290,8 @@ fun HomeScreen(
                                 // MusicRepository.getAutoplayRecommendation.
                                 onPlayClick = { musicViewModel.playTrack(track, listOf(track)) },
                                 onFavoriteClick = { musicViewModel.toggleFavorite(track) },
-                                onDownloadClick = { musicViewModel.toggleDownload(track) }
+                                onDownloadClick = { musicViewModel.toggleDownload(track) },
+                                onAddToPlaylistClick = { trackPendingPlaylistAdd = track }
                             )
                         }
                     }
@@ -352,6 +358,14 @@ fun HomeScreen(
                 )
             }
         }
+
+        trackPendingPlaylistAdd?.let { track ->
+            AddToPlaylistDialog(
+                track = track,
+                playlistViewModel = playlistViewModel,
+                onDismiss = { trackPendingPlaylistAdd = null }
+            )
+        }
     }
 }
 
@@ -361,6 +375,7 @@ fun TrackRow(
     onPlayClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     onDownloadClick: () -> Unit,
+    onAddToPlaylistClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -405,6 +420,18 @@ fun TrackRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+
+            // Add-to-playlist control - only shown when the caller wires it up
+            // (Home/Search rows do; Library's Favorites/Downloads rows don't).
+            if (onAddToPlaylistClick != null) {
+                IconButton(onClick = onAddToPlaylistClick) {
+                    Icon(
+                        imageVector = Icons.Default.PlaylistAdd,
+                        contentDescription = "Add to playlist",
+                        tint = Color.Gray
+                    )
+                }
             }
 
             // Favorites & Download controls
