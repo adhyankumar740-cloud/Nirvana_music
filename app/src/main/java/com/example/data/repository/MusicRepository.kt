@@ -2,6 +2,9 @@ package com.example.data.repository
 
 import com.example.data.database.PlayHistoryDao
 import com.example.data.database.PlayHistoryEntity
+import com.example.data.database.PlaylistDao
+import com.example.data.database.PlaylistEntity
+import com.example.data.database.PlaylistTrackEntity
 import com.example.data.database.SavedTrackDao
 import com.example.data.database.SavedTrackEntity
 import com.example.data.database.SearchHistoryDao
@@ -18,6 +21,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -50,6 +54,23 @@ data class PersonalizationProfile(
     val isEmpty: Boolean get() = topGenres.isEmpty() && topArtists.isEmpty() && topSearchQueries.isEmpty()
 }
 
+/** UI-facing playlist summary - [PlaylistEntity] plus its live track count. */
+data class Playlist(
+    val id: Long,
+    val name: String,
+    val trackCount: Int,
+    val createdAt: Long
+)
+
+/** Result of a pasted-text playlist import - lets the UI show "12/15 songs matched" instead of a silent partial import. */
+data class PlaylistImportResult(
+    val playlistId: Long,
+    val playlistName: String,
+    val matchedCount: Int,
+    val totalCount: Int,
+    val unmatchedLines: List<String>
+)
+
 class MusicRepository(
     private val apiService: ITunesService,
     private val youtubeService: YouTubeService,
@@ -57,7 +78,8 @@ class MusicRepository(
     private val lrcLibService: LrcLibService,
     private val savedTrackDao: SavedTrackDao,
     private val searchHistoryDao: SearchHistoryDao,
-    private val playHistoryDao: PlayHistoryDao
+    private val playHistoryDao: PlayHistoryDao,
+    private val playlistDao: PlaylistDao
 ) {
     // Cache for Samples feed to ensure instant load times
     private val samplesCache = mutableListOf<Track>()
@@ -477,5 +499,91 @@ class MusicRepository(
 
     suspend fun isTrackDownloaded(trackId: Long): Boolean = withContext(Dispatchers.IO) {
         savedTrackDao.getSavedTrackById(trackId)?.isDownloaded ?: false
+    }
+
+    // ---- Playlists: create, import, play ----
+
+    /** Live list of the user's playlists with track counts, newest first. */
+    fun getPlaylists(): Flow<List<Playlist>> =
+        combine(playlistDao.getAllPlaylists(), playlistDao.getTrackCounts()) { playlists, counts ->
+            val countMap = counts.associate { it.playlistId to it.count }
+            playlists.map { p ->
+                Playlist(id = p.id, name = p.name, trackCount = countMap[p.id] ?: 0, createdAt = p.createdAt)
+            }
+        }
+
+    /** Tracks in a playlist, in the order they were added. */
+    fun getPlaylistTracks(playlistId: Long): Flow<List<Track>> =
+        playlistDao.getTracksForPlaylist(playlistId).map { list -> list.map { it.toTrack() } }
+
+    suspend fun createPlaylist(name: String): Long = withContext(Dispatchers.IO) {
+        val trimmed = name.trim().ifBlank { "New Playlist" }
+        playlistDao.insertPlaylist(PlaylistEntity(name = trimmed))
+    }
+
+    suspend fun renamePlaylist(playlistId: Long, newName: String) = withContext(Dispatchers.IO) {
+        val trimmed = newName.trim()
+        if (trimmed.isNotEmpty()) playlistDao.renamePlaylist(playlistId, trimmed)
+    }
+
+    suspend fun deletePlaylist(playlistId: Long) = withContext(Dispatchers.IO) {
+        playlistDao.deletePlaylist(playlistId)
+    }
+
+    suspend fun addTrackToPlaylist(playlistId: Long, track: Track) = withContext(Dispatchers.IO) {
+        playlistDao.insertPlaylistTrack(PlaylistTrackEntity.fromTrack(playlistId, track))
+    }
+
+    suspend fun removeTrackFromPlaylist(playlistId: Long, trackId: Long) = withContext(Dispatchers.IO) {
+        playlistDao.deletePlaylistTrack(playlistId, trackId)
+    }
+
+    suspend fun isTrackInPlaylist(playlistId: Long, trackId: Long): Boolean = withContext(Dispatchers.IO) {
+        playlistDao.isTrackInPlaylist(playlistId, trackId)
+    }
+
+    /**
+     * Imports a playlist from pasted text - one song per line, e.g.
+     * "Blinding Lights - The Weeknd" (also tolerates plain M3U files: '#'
+     * comment lines and blank lines are skipped). Each line is resolved
+     * against the iTunes song catalog with a single best-match lookup, same
+     * approach as [findBestYouTubeMatch]/[resolveGenre]. Lines that don't
+     * match anything are reported back instead of silently dropped, so the
+     * user knows their import was partial rather than assuming it was complete.
+     */
+    suspend fun importPlaylist(name: String, rawText: String): PlaylistImportResult = withContext(Dispatchers.IO) {
+        val lines = rawText.lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .distinct()
+
+        val playlistName = name.trim().ifBlank { "Imported Playlist" }
+        val playlistId = playlistDao.insertPlaylist(PlaylistEntity(name = playlistName))
+
+        val unmatched = mutableListOf<String>()
+        var matched = 0
+
+        for (line in lines) {
+            try {
+                val response = apiService.search(term = line, media = "music", entity = "song", limit = 1)
+                val track = response.results.firstOrNull()?.toTrack()
+                if (track != null && !track.previewUrl.isNullOrEmpty()) {
+                    playlistDao.insertPlaylistTrack(PlaylistTrackEntity.fromTrack(playlistId, track))
+                    matched++
+                } else {
+                    unmatched.add(line)
+                }
+            } catch (e: Exception) {
+                unmatched.add(line)
+            }
+        }
+
+        PlaylistImportResult(
+            playlistId = playlistId,
+            playlistName = playlistName,
+            matchedCount = matched,
+            totalCount = lines.size,
+            unmatchedLines = unmatched
+        )
     }
 }
