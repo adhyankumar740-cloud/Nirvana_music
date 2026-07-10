@@ -153,7 +153,6 @@ class MusicPlayer(private val context: Context) {
             newPosition: Player.PositionInfo,
             reason: Int
         ) {
-            // Control centre seek bar drag handling for YouTube tracks
             if (reason == Player.DISCONTINUITY_REASON_SEEK && _currentTrack.value?.source == TrackSource.YOUTUBE) {
                 val targetSeekMs = newPosition.positionMs
                 _playbackPosition.value = targetSeekMs
@@ -365,21 +364,25 @@ class MusicPlayer(private val context: Context) {
         _playbackError.value = null
         loadedYoutubeVideoId = track.youtubeVideoId
         
-        // INSTANT LOAD FOR SYSTEM TRAY: Koi local asset URI nahi daalenge jo delay kare
+        // --- BACKGROUND SILENT AUDIO TRICK ---
         runOnController { controller ->
             val metadata = MediaMetadata.Builder()
                 .setTitle(track.title)
                 .setArtist(track.artist ?: "YouTube Stream")
                 .build()
 
-            // Bina kisi playback resource ke sirf stream tracking define karenge
+            val packageName = context.packageName
+            val silentAudioUri = "android.resource://$packageName/raw/silent_audio"
+
             val fastMediaItem = MediaItem.Builder()
+                .setUri(silentAudioUri)
                 .setMediaId("yt_${track.id}")
                 .setMediaMetadata(metadata)
                 .build()
 
             controller.setMediaItem(fastMediaItem)
-            // Prepare ko block nahi karenge taaki background queue instant execute ho ske
+            controller.prepare()
+            controller.play() // Service ko active rakhne ke liye silent audio play karna zaruri hai
         }
 
         track.youtubeVideoId?.let { videoId ->
@@ -408,6 +411,7 @@ class MusicPlayer(private val context: Context) {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
             youtubeBridge?.pause()
             _isPlaying.value = false
+            runOnController { it.pause() } // Silent audio pause karna zaroori hai
         } else {
             runOnController { it.pause() }
         }
@@ -417,6 +421,7 @@ class MusicPlayer(private val context: Context) {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
             youtubeBridge?.play()
             _isPlaying.value = true
+            runOnController { it.play() } // Silent audio wapas start karo
         } else {
             runOnController { it.play() }
         }
@@ -442,6 +447,7 @@ class MusicPlayer(private val context: Context) {
     fun seekTo(position: Long) {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
             youtubeBridge?.seekTo(position / 1000f)
+            runOnController { it.seekTo(position) } // Seek bar ko sync karne ke liye
         } else {
             runOnController { it.seekTo(position) }
         }
@@ -453,7 +459,7 @@ class MusicPlayer(private val context: Context) {
         if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
         if (videoId != loadedYoutubeVideoId) return
         when (state) {
-            1 -> { // PLAYING STATE
+            1 -> { // PLAYING
                 _isPlaying.value = true
                 _isBuffering.value = false
                 hasReachedPlayingState = true
@@ -463,7 +469,7 @@ class MusicPlayer(private val context: Context) {
                 if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
                 else onLocalPlayPause?.invoke(true, (currentTimeSec * 1000).toLong())
             }
-            2 -> { // PAUSED STATE
+            2 -> { // PAUSED
                 _isPlaying.value = false
                 _isBuffering.value = false
                 stopProgressTracker()
@@ -481,6 +487,14 @@ class MusicPlayer(private val context: Context) {
         if (videoId != loadedYoutubeVideoId) return
         val currentMs = (currentTimeSec * 1000).toLong()
         _playbackPosition.value = currentMs
+        
+        // Background timeline ko asli YouTube timeline se thoda sync rakho
+        mediaController?.let {
+            if (Math.abs(it.currentPosition - currentMs) > 2000) {
+                it.seekTo(currentMs)
+            }
+        }
+        
         if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
     }
 
@@ -531,7 +545,6 @@ class MusicPlayer(private val context: Context) {
                         if (it.isPlaying) _playbackPosition.value = it.currentPosition.coerceAtLeast(0L)
                     }
                 }
-                // Fast updates keep seek bar moving flawlessly without locking up the CPU
                 delay(1000)
             }
         }
