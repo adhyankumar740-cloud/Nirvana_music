@@ -85,6 +85,21 @@ class MusicViewModel(
                 }
         }
 
+        // Listening history: log every track that actually starts playing (own
+        // launch, separate from the lyrics collector, so a slow/failed lyrics
+        // fetch never delays or skips recording play history). This is what
+        // powers the "listening history" half of Home/Samples/Auto-Next
+        // personalization.
+        viewModelScope.launch {
+            player.currentTrack
+                .distinctUntilChanged { old, new -> old?.id == new?.id }
+                .collectLatest { track ->
+                    if (track != null) {
+                        repository.recordTrackPlayed(track)
+                    }
+                }
+        }
+
         // Home Search used to fire a full YouTube API call (search = 100 quota
         // units, on a free 10,000-unit/day project) on EVERY keystroke, with no
         // debounce and no cancellation of in-flight calls - so typing a single
@@ -104,6 +119,9 @@ class MusicViewModel(
                         return@collectLatest
                     }
                     _isSearching.value = true
+                    // Log search history for personalization. Fire-and-forget on
+                    // the same scope: this must never block/slow the actual search.
+                    launch { repository.recordSearchQuery(query) }
                     repository.searchTracks(query).collectLatest { outcome ->
                         when (outcome) {
                             is SearchOutcome.Success -> {
