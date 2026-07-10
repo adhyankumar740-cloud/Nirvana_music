@@ -100,6 +100,9 @@ class MusicPlayer(private val context: Context) {
     private val scope = CoroutineScope(Dispatchers.Main + Job())
 
     init {
+        PlaybackBridge.onNext = { skipNext() }
+        PlaybackBridge.onPrevious = { skipPrevious() }
+
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
         controllerFuture.addListener({
@@ -277,6 +280,13 @@ class MusicPlayer(private val context: Context) {
                     playOrderPos = playOrder.size - 1
                     _queueIndex.value = newIndex
                     play(next)
+                } else {
+                    // Pehle yahan kuch nahi hota tha - button dabane pe koi
+                    // response hi nahi milta tha (na error, na naya gaana),
+                    // isliye "Next" kaam hi nahi karta lagta tha. Ab user ko
+                    // clear pata chalega ki koi similar gaana nahi mila
+                    // (usually YouTube API key/quota issue ya genre match na milna).
+                    _playbackError.value = "Koi agla gaana nahi mila - YouTube API key/quota check karo."
                 }
             } finally {
                 _isResolvingAutoplay.value = false
@@ -560,6 +570,8 @@ class MusicPlayer(private val context: Context) {
         cancelBufferingWatchdog()
         mediaController?.release()
         mediaController = null
+        if (PlaybackBridge.onNext != null) PlaybackBridge.onNext = null
+        if (PlaybackBridge.onPrevious != null) PlaybackBridge.onPrevious = null
     }
 }
 
