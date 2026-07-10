@@ -51,6 +51,7 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.viewmodel.AuthViewModel
 import com.example.ui.viewmodel.JamViewModel
 import com.example.ui.viewmodel.MusicViewModel
+import com.example.ui.viewmodel.PlaylistViewModel
 import com.example.ui.viewmodel.SamplesViewModel
 
 class MainActivity : ComponentActivity() {
@@ -73,6 +74,10 @@ class MainActivity : ComponentActivity() {
 
     private val jamViewModel: JamViewModel by viewModels {
         JamViewModel.Factory(appContainer.jamManager, appContainer.jamChatManager, appContainer.musicPlayer)
+    }
+
+    private val playlistViewModel: PlaylistViewModel by viewModels {
+        PlaylistViewModel.Factory(appContainer.musicRepository, appContainer.musicPlayer)
     }
 
     // No-op either way: if denied, the foreground service/playback still runs,
@@ -103,7 +108,8 @@ class MainActivity : ComponentActivity() {
                         musicViewModel = musicViewModel,
                         authViewModel = authViewModel,
                         samplesViewModel = samplesViewModel,
-                        jamViewModel = jamViewModel
+                        jamViewModel = jamViewModel,
+                        playlistViewModel = playlistViewModel
                     )
                 }
             }
@@ -130,7 +136,8 @@ fun MainAppLayout(
     musicViewModel: MusicViewModel,
     authViewModel: AuthViewModel,
     samplesViewModel: SamplesViewModel,
-    jamViewModel: JamViewModel
+    jamViewModel: JamViewModel,
+    playlistViewModel: PlaylistViewModel
 ) {
     val selectedTab by musicViewModel.selectedTab.collectAsState()
 
@@ -249,10 +256,10 @@ fun MainAppLayout(
                 .padding(innerPadding)
         ) {
             when (selectedTab) {
-                "home" -> HomeScreen(musicViewModel = musicViewModel, authViewModel = authViewModel)
+                "home" -> HomeScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
                 "samples" -> SamplesScreen(samplesViewModel = samplesViewModel)
                 "jam" -> JamScreen(jamViewModel = jamViewModel, authViewModel = authViewModel)
-                "library" -> LibraryScreen(musicViewModel = musicViewModel, authViewModel = authViewModel)
+                "library" -> LibraryScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
             }
 
             // NOTE: originally kept visibly small here whenever a YouTube full-song
