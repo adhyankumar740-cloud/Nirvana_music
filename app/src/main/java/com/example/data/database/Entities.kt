@@ -59,6 +59,34 @@ data class SavedTrackEntity(
     }
 }
 
+/**
+ * One row per search the user actually ran (post-debounce, non-blank query).
+ * Powers the "search history" half of personalization: recent/frequent query
+ * text is fed back in as extra search terms for the Home feed.
+ */
+@Entity(tableName = "search_history")
+data class SearchHistoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val query: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+/**
+ * One row per track the user actually listened to (play started), with the
+ * *resolved* genre (never the YouTube-default "Music" placeholder) so genre
+ * affinity can be computed directly with SQL GROUP BY instead of re-resolving
+ * genres for every history row on every read.
+ */
+@Entity(tableName = "play_history")
+data class PlayHistoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val trackId: Long,
+    val title: String,
+    val artist: String,
+    val genre: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "chat_messages")
 data class ChatMessageEntity(
     @PrimaryKey val id: String,
