@@ -21,31 +21,31 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         player = ExoPlayer.Builder(this)
-            .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
+            .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true) [cite: 135]
             .setHandleAudioBecomingNoisy(true)
             .build()
 
+        // Builder ke saath mediaSession initialize kiya taaki system controls linked rahein
         mediaSession = MediaSession.Builder(this, player).build()
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession [cite: 135, 136]
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val session = mediaSession ?: return super.onTaskRemoved(rootIntent)
+        val session = mediaSession ?: return super.onTaskRemoved(rootIntent) [cite: 136]
         
-        // Agar na toh ExoPlayer chal rha hai aur na hi YouTube (Aapko musicPlayer ka state track karna hoga)
-        if (!session.player.playWhenReady || session.player.mediaItemCount == 0) {
-            stopSelf()
+        if (!session.player.playWhenReady || session.player.mediaItemCount == 0) { [cite: 136]
+            stopSelf() [cite: 136]
         }
-        super.onTaskRemoved(rootIntent)
+        super.onTaskRemoved(rootIntent) [cite: 136, 137]
     }
 
     override fun onDestroy() {
-        mediaSession?.run {
-            player.release()
-            release()
-            mediaSession = null
+        mediaSession?.run { [cite: 137]
+            player.release() [cite: 137]
+            release() [cite: 137]
+            mediaSession = null [cite: 137]
         }
-        super.onDestroy()
+        super.onDestroy() [cite: 137]
     }
 }
