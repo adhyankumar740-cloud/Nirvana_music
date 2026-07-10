@@ -10,9 +10,11 @@ import androidx.room.RoomDatabase
         SavedTrackEntity::class,
         ChatMessageEntity::class,
         SearchHistoryEntity::class,
-        PlayHistoryEntity::class
+        PlayHistoryEntity::class,
+        PlaylistEntity::class,
+        PlaylistTrackEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class MusicDatabase : RoomDatabase() {
@@ -20,6 +22,7 @@ abstract class MusicDatabase : RoomDatabase() {
     abstract fun chatMessageDao(): ChatMessageDao
     abstract fun searchHistoryDao(): SearchHistoryDao
     abstract fun playHistoryDao(): PlayHistoryDao
+    abstract fun playlistDao(): PlaylistDao
 
     companion object {
         @Volatile
