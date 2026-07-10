@@ -38,7 +38,8 @@ class AppContainer(private val context: Context) {
             lrcLibService = lrcLibService,
             savedTrackDao = database.savedTrackDao(),
             searchHistoryDao = database.searchHistoryDao(),
-            playHistoryDao = database.playHistoryDao()
+            playHistoryDao = database.playHistoryDao(),
+            playlistDao = database.playlistDao()
         )
     }
 
