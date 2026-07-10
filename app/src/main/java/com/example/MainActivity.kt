@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -250,10 +251,15 @@ fun MainAppLayout(
         },
         modifier = Modifier.fillMaxSize()
     ) { innerPadding ->
+        // consumeWindowInsets is important here: without it, the bottom-nav-bar
+        // space reserved by innerPadding stacks on top of JamScreen's own
+        // imePadding() when the keyboard opens - pushing the message input box
+        // way above the keyboard instead of sitting right above it.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .consumeWindowInsets(innerPadding)
         ) {
             when (selectedTab) {
                 "home" -> HomeScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
