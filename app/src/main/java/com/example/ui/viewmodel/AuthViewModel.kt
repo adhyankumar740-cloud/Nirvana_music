@@ -13,6 +13,7 @@ import androidx.lifecycle.viewModelScope
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -93,48 +94,89 @@ class AuthViewModel(private val context: Context) : ViewModel() {
             .build()
 
         viewModelScope.launch {
-            try {
-                val result = credentialManager.getCredential(context = activityContext, request = request)
-                val credential = result.credential
+            // Credential Manager's getCredential() is known to intermittently
+            // throw a generic GetCredentialException on the first attempt or
+            // two (Play Services/account-picker warm-up) and then succeed
+            // right after - which is why it used to take 3-4 manual taps.
+            // Retrying a couple of times in the background (silently, before
+            // showing any error) fixes that without the user noticing.
+            val maxAttempts = 3
+            var lastError: Exception? = null
 
-                if (credential !is CustomCredential ||
-                    credential.type != GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
-                ) {
-                    _uiState.value = AuthUiState.Error("Ye credential Google ka nahi tha. Dobara try karo.")
+            for (attempt in 1..maxAttempts) {
+                try {
+                    val result = credentialManager.getCredential(context = activityContext, request = request)
+                    val credential = result.credential
+
+                    if (credential !is CustomCredential ||
+                        credential.type != GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+                    ) {
+                        _uiState.value = AuthUiState.Error("Ye credential Google ka nahi tha. Dobara try karo.")
+                        return@launch
+                    }
+
+                    val googleCredential = try {
+                        GoogleIdTokenCredential.createFrom(credential.data)
+                    } catch (e: GoogleIdTokenParsingException) {
+                        _uiState.value = AuthUiState.Error("Google response parse nahi hua. Dobara try karo.")
+                        return@launch
+                    }
+
+                    val displayName = googleCredential.displayName?.takeIf { it.isNotBlank() }
+                        ?: googleCredential.id.substringBefore("@")
+                    val userEmail = googleCredential.id // Google ID token's "id" is the account email.
+
+                    prefs.edit()
+                        .putString(KEY_USERNAME, displayName)
+                        .putString(KEY_EMAIL, userEmail)
+                        .putBoolean(KEY_IS_GUEST, false)
+                        .apply()
+
+                    _username.value = displayName
+                    _email.value = userEmail
+                    _isLoggedIn.value = true
+                    _uiState.value = AuthUiState.SignedOut // reset - screen won't show since isLoggedIn is now true
                     return@launch
-                }
-
-                val googleCredential = try {
-                    GoogleIdTokenCredential.createFrom(credential.data)
-                } catch (e: GoogleIdTokenParsingException) {
-                    _uiState.value = AuthUiState.Error("Google response parse nahi hua. Dobara try karo.")
+                } catch (e: GetCredentialCancellationException) {
+                    // User dismissed the picker - not an error, just go back to idle.
+                    _uiState.value = AuthUiState.SignedOut
                     return@launch
+                } catch (e: GetCredentialException) {
+                    lastError = e
+                    if (attempt < maxAttempts) {
+                        delay(400L)
+                        continue
+                    }
+                    _uiState.value = AuthUiState.Error(
+                        "Google sign-in fail ho gaya. Dobara try karo."
+                    )
+                } catch (e: Exception) {
+                    lastError = e
+                    if (attempt < maxAttempts) {
+                        delay(400L)
+                        continue
+                    }
+                    _uiState.value = AuthUiState.Error(e.message ?: "Kuch galat ho gaya. Dobara try karo.")
                 }
-
-                val displayName = googleCredential.displayName?.takeIf { it.isNotBlank() }
-                    ?: googleCredential.id.substringBefore("@")
-                val userEmail = googleCredential.id // Google ID token's "id" is the account email.
-
-                prefs.edit()
-                    .putString(KEY_USERNAME, displayName)
-                    .putString(KEY_EMAIL, userEmail)
-                    .apply()
-
-                _username.value = displayName
-                _email.value = userEmail
-                _isLoggedIn.value = true
-                _uiState.value = AuthUiState.SignedOut // reset - screen won't show since isLoggedIn is now true
-            } catch (e: GetCredentialCancellationException) {
-                // User dismissed the picker - not an error, just go back to idle.
-                _uiState.value = AuthUiState.SignedOut
-            } catch (e: GetCredentialException) {
-                _uiState.value = AuthUiState.Error(
-                    "Google sign-in fail ho gaya. Dobara try karo."
-                )
-            } catch (e: Exception) {
-                _uiState.value = AuthUiState.Error(e.message ?: "Kuch galat ho gaya. Dobara try karo.")
             }
         }
+    }
+
+    /**
+     * Lets someone use the app without a Google account - stores a local
+     * "Guest" identity the same way a real sign-in would, so the rest of the
+     * app (which only checks [isLoggedIn]) doesn't need to know the difference.
+     */
+    fun loginAsGuest() {
+        prefs.edit()
+            .putString(KEY_USERNAME, "Guest")
+            .putString(KEY_EMAIL, "")
+            .putBoolean(KEY_IS_GUEST, true)
+            .apply()
+        _username.value = "Guest"
+        _email.value = ""
+        _isLoggedIn.value = true
+        _uiState.value = AuthUiState.SignedOut
     }
 
     fun dismissError() {
@@ -162,6 +204,7 @@ class AuthViewModel(private val context: Context) : ViewModel() {
     companion object {
         private const val KEY_USERNAME = "username"
         private const val KEY_EMAIL = "email"
+        private const val KEY_IS_GUEST = "is_guest"
 
         // The WEB (client_type 3) OAuth client from app/google-services.json -
         // required by GetGoogleIdOption.setServerClientId(). This is NOT the
