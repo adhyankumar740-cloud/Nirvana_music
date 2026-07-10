@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.util.Log
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -21,631 +22,527 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-enum class RepeatMode { OFF, ONE, ALL }
+enum class RepeatMode { OFF, ONE, ALL } [cite: 1]
 
-/**
- * Bridge to the small, always-visible embedded YouTube player (see
- * YouTubePlayerHost.kt). Kept visible per YouTube's Terms of Service - full
- * songs are NOT extracted/streamed directly, they play through YouTube's own
- * official IFrame player, just shown small. This is also why YouTube tracks
- * pause when the app is backgrounded (see PlaybackService.kt doc comment) -
- * that constraint is a platform/ToS wall, not something either engine choice
- * can route around.
- */
-interface YouTubePlayerBridge {
-    fun loadVideo(videoId: String)
-    fun play()
-    fun pause()
-    fun seekTo(seconds: Float)
+interface YouTubePlayerBridge { [cite: 4]
+    fun loadVideo(videoId: String) [cite: 4]
+    fun play() [cite: 4]
+    fun pause() [cite: 4]
+    fun seekTo(seconds: Float) [cite: 4]
 }
 
-/**
- * Central playback engine. Two underlying engines, selected per-track by
- * [Track.source]:
- *  - ITUNES  -> Media3 ExoPlayer, connected via MediaController to
- *               [PlaybackService] (a real foreground service) - gives real
- *               background playback + lock-screen/notification controls.
- *  - YOUTUBE -> the small visible embedded WebView player (YouTubePlayerHost)
- *               - foreground-only, per YouTube's Terms of Service.
- *
- * Queue/shuffle/repeat/autoplay are implemented at THIS level (not handed off
- * to ExoPlayer's native playlist) because a single queue can mix both source
- * types, and ExoPlayer can't play a YouTube video directly.
- */
-class MusicPlayer(private val context: Context) {
+class MusicPlayer(private val context: Context) { [cite: 8]
 
-    // ---- Media3 controller (iTunes-sourced tracks; real background playback) ----
-    private var mediaController: MediaController? = null
-    private val pendingActions = mutableListOf<() -> Unit>()
+    private var mediaController: MediaController? = null [cite: 8, 9]
+    private val pendingActions = mutableListOf<() -> Unit>() [cite: 9]
 
-    // Fired only when THIS device caused the change (button press), not when
-    // applyRemoteX() is mirroring an update that came from a Jam partner.
-    // JamViewModel wires these to JamManager.pushX so the change gets broadcast.
-    var onLocalSongChange: ((Track) -> Unit)? = null
-    var onLocalPlayPause: ((isPlaying: Boolean, positionMs: Long) -> Unit)? = null
-    var onLocalSeek: ((positionMs: Long) -> Unit)? = null
+    var onLocalSongChange: ((Track) -> Unit)? = null [cite: 10, 11]
+    var onLocalPlayPause: ((isPlaying: Boolean, positionMs: Long) -> Unit)? = null [cite: 11, 12]
+    var onLocalSeek: ((positionMs: Long) -> Unit)? = null [cite: 12, 13]
 
-    private var isApplyingRemote = false
-    // Consumed exactly once by whichever engine's async "state changed" callback
-    // fires next - avoids the race where isApplyingRemote would already have
-    // been reset (by applyRemoteX's synchronous `finally`) before the engine's
-    // callback arrives.
-    private var suppressNextPlayPauseBroadcast = false
+    private var isApplyingRemote = false [cite: 13]
+    private var suppressNextPlayPauseBroadcast = false [cite: 14]
 
-    // Set by YouTubePlayerHost once its WebView is composed. Stays set for the
-    // app's lifetime (the host is mounted once, persistently, at the app root).
-    var youtubeBridge: YouTubePlayerBridge? = null
+    var youtubeBridge: YouTubePlayerBridge? = null [cite: 16]
 
-    /**
-     * Called when the queue naturally runs out (last track ends, repeat=OFF).
-     * [recentTracks] (current queue + recent play history, full Track objects)
-     * lets the provider recognise "the same song, different upload" and skip
-     * it, not just an exact id match.
-     */
-    var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null
+    var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null [cite: 18, 19]
 
-    private val _currentTrack = MutableStateFlow<Track?>(null)
-    val currentTrack: StateFlow<Track?> = _currentTrack.asStateFlow()
+    private val _currentTrack = MutableStateFlow<Track?>(null) [cite: 19]
+    val currentTrack: StateFlow<Track?> = _currentTrack.asStateFlow() [cite: 19]
 
-    private val _isPlaying = MutableStateFlow(false)
-    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
+    private val _isPlaying = MutableStateFlow(false) [cite: 19]
+    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow() [cite: 19]
 
-    private val _playbackPosition = MutableStateFlow(0L)
-    val playbackPosition: StateFlow<Long> = _playbackPosition.asStateFlow()
+    private val _playbackPosition = MutableStateFlow(0L) [cite: 19]
+    val playbackPosition: StateFlow<Long> = _playbackPosition.asStateFlow() [cite: 19]
 
-    private val _duration = MutableStateFlow(0L)
-    val duration: StateFlow<Long> = _duration.asStateFlow()
+    private val _duration = MutableStateFlow(0L) [cite: 19]
+    val duration: StateFlow<Long> = _duration.asStateFlow() [cite: 19]
 
-    private val _isBuffering = MutableStateFlow(false)
-    val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow()
+    private val _isBuffering = MutableStateFlow(false) [cite: 19]
+    val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow() [cite: 19]
 
-    private val _queue = MutableStateFlow<List<Track>>(emptyList())
-    val queue: StateFlow<List<Track>> = _queue.asStateFlow()
+    private val _queue = MutableStateFlow<List<Track>>(emptyList()) [cite: 19]
+    val queue: StateFlow<List<Track>> = _queue.asStateFlow() [cite: 19]
 
-    private val _queueIndex = MutableStateFlow(-1)
-    val queueIndex: StateFlow<Int> = _queueIndex.asStateFlow()
+    private val _queueIndex = MutableStateFlow(-1) [cite: 20]
+    val queueIndex: StateFlow<Int> = _queueIndex.asStateFlow() [cite: 20]
 
-    private val _isShuffleEnabled = MutableStateFlow(false)
-    val isShuffleEnabled: StateFlow<Boolean> = _isShuffleEnabled.asStateFlow()
+    private val _isShuffleEnabled = MutableStateFlow(false) [cite: 20]
+    val isShuffleEnabled: StateFlow<Boolean> = _isShuffleEnabled.asStateFlow() [cite: 20]
 
-    private val _repeatMode = MutableStateFlow(RepeatMode.OFF)
-    val repeatMode: StateFlow<RepeatMode> = _repeatMode.asStateFlow()
+    private val _repeatMode = MutableStateFlow(RepeatMode.OFF) [cite: 20]
+    val repeatMode: StateFlow<RepeatMode> = _repeatMode.asStateFlow() [cite: 20]
 
-    private val _isResolvingAutoplay = MutableStateFlow(false)
-    val isResolvingAutoplay: StateFlow<Boolean> = _isResolvingAutoplay.asStateFlow()
+    private val _isResolvingAutoplay = MutableStateFlow(false) [cite: 20]
+    val isResolvingAutoplay: StateFlow<Boolean> = _isResolvingAutoplay.asStateFlow() [cite: 20]
 
-    // Surfaces when auto-skip gives up after several tracks in a row failed
-    // (see registerPlaybackFailureAndMaybeStop below). Null = no error.
-    private val _playbackError = MutableStateFlow<String?>(null)
-    val playbackError: StateFlow<String?> = _playbackError.asStateFlow()
+    private val _playbackError = MutableStateFlow<String?>(null) [cite: 21]
+    val playbackError: StateFlow<String?> = _playbackError.asStateFlow() [cite: 21]
 
-    // Guards against a rapid cascade of skips: a video that errors (onError)
-    // OR that reports "ended" without ever actually reaching the "playing"
-    // state (a bad/near-zero-length result) used to immediately trigger the
-    // next track, which could fail the same way - chewing through the whole
-    // queue (and then autoplay) in under a second with no way to stop it.
-    // After maxConsecutivePlaybackFailures in a row, we stop advancing instead
-    // of continuing to cascade, and surface an error so the UI isn't left
-    // silently spinning either.
-    private var hasReachedPlayingState = false
-    private var consecutivePlaybackFailures = 0
-    private val maxConsecutivePlaybackFailures = 3
+    private var hasReachedPlayingState = false [cite: 23]
+    private var consecutivePlaybackFailures = 0 [cite: 23]
+    private val maxConsecutivePlaybackFailures = 3 [cite: 23]
 
-    // Play order (list of indices into _queue.value) - separate from the
-    // user-visible queue order so shuffling doesn't reshuffle what's shown.
-    private var playOrder: List<Int> = emptyList()
-    private var playOrderPos = 0
+    private var playOrder: List<Int> = emptyList() [cite: 24]
+    private var playOrderPos = 0 [cite: 24]
 
-    private val recentlyPlayedIds = ArrayDeque<Long>()
-    private val recentlyPlayedTracks = ArrayDeque<Track>()
-    private val recentlyPlayedCap = 40
+    private val recentlyPlayedIds = ArrayDeque<Long>() [cite: 24]
+    private val recentlyPlayedTracks = ArrayDeque<Track>() [cite: 24]
+    private val recentlyPlayedCap = 40 [cite: 24]
 
-    // The videoId we most recently told the WebView/IFrame player to load.
-    // Every YouTube callback reports which videoId it's about; if it doesn't
-    // match this, it's a stale event left over from a track we've since
-    // moved on from and must be ignored (see YouTubePlayerHost.kt).
-    private var loadedYoutubeVideoId: String? = null
+    private var loadedYoutubeVideoId: String? = null [cite: 26]
 
-    // Guards against the IFrame player getting stuck on "buffering" forever
-    // with no onStateChange/onError ever arriving (flaky WebView/network).
-    private var bufferingWatchdogJob: Job? = null
-    private val bufferingTimeoutMs = 12_000L
+    private var bufferingWatchdogJob: Job? = null [cite: 27]
+    private val bufferingTimeoutMs = 12_000L [cite: 27]
 
-    private var progressJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.Main + Job())
+    private var progressJob: Job? = null [cite: 27, 28]
+    private val scope = CoroutineScope(Dispatchers.Main + Job()) [cite: 28]
 
     init {
-        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java)) [cite: 28]
+        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync() [cite: 28]
         controllerFuture.addListener({
             try {
-                mediaController = controllerFuture.get()
-                mediaController?.addListener(playerListener)
-                pendingActions.forEach { it() }
-                pendingActions.clear()
+                mediaController = controllerFuture.get() [cite: 28]
+                mediaController?.addListener(playerListener) [cite: 28]
+                pendingActions.forEach { it() } [cite: 29]
+                pendingActions.clear() [cite: 29]
             } catch (e: Exception) {
-                Log.e("MusicPlayer", "Failed to connect MediaController", e)
+                Log.e("MusicPlayer", "Failed to connect MediaController", e) [cite: 29]
             }
-        }, MoreExecutors.directExecutor())
+        }, MoreExecutors.directExecutor()) [cite: 29]
     }
 
-    private fun runOnController(action: (MediaController) -> Unit) {
-        val controller = mediaController
-        if (controller != null) action(controller) else pendingActions.add { mediaController?.let(action) }
+    private fun runOnController(action: (MediaController) -> Unit) { [cite: 29, 30]
+        val controller = mediaController [cite: 30]
+        if (controller != null) action(controller) else pendingActions.add { mediaController?.let(action) } [cite: 30]
     }
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlayingNow: Boolean) {
-            if (_currentTrack.value?.source != TrackSource.ITUNES) return
-            _isPlaying.value = isPlayingNow
-            if (isPlayingNow) startProgressTracker() else stopProgressTracker()
+            if (_currentTrack.value?.source != TrackSource.ITUNES) return [cite: 30, 31]
+            _isPlaying.value = isPlayingNow [cite: 31]
+            
+            if (isPlayingNow) startProgressTracker() else stopProgressTracker() [cite: 31]
             if (suppressNextPlayPauseBroadcast) {
-                suppressNextPlayPauseBroadcast = false
+                suppressNextPlayPauseBroadcast = false [cite: 31]
             } else {
-                onLocalPlayPause?.invoke(isPlayingNow, _playbackPosition.value)
+                onLocalPlayPause?.invoke(isPlayingNow, _playbackPosition.value) [cite: 31]
             }
         }
 
         override fun onPlaybackStateChanged(state: Int) {
-            if (_currentTrack.value?.source != TrackSource.ITUNES) return
+            if (_currentTrack.value?.source != TrackSource.ITUNES) return [cite: 32]
             when (state) {
-                Player.STATE_BUFFERING -> _isBuffering.value = true
+                Player.STATE_BUFFERING -> _isBuffering.value = true [cite: 32]
                 Player.STATE_READY -> {
-                    _isBuffering.value = false
-                    _duration.value = (mediaController?.duration ?: 0L).coerceAtLeast(0L)
+                    _isBuffering.value = false [cite: 32]
+                    _duration.value = (mediaController?.duration ?: 0L).coerceAtLeast(0L) [cite: 33]
                 }
-                Player.STATE_ENDED -> handleTrackEnded()
+                Player.STATE_ENDED -> handleTrackEnded() [cite: 33]
                 else -> {}
             }
         }
     }
 
-    // ---------------- Queue / shuffle / repeat ----------------
-
     fun setQueue(tracks: List<Track>, startIndex: Int = 0) {
-        if (tracks.isEmpty()) return
-        consecutivePlaybackFailures = 0
-        _playbackError.value = null
-        _queue.value = tracks
-        rebuildPlayOrder(anchorIndex = startIndex.coerceIn(0, tracks.size - 1))
-        _queueIndex.value = playOrder[playOrderPos]
-        play(tracks[playOrder[playOrderPos]])
+        if (tracks.isEmpty()) return [cite: 34]
+        consecutivePlaybackFailures = 0 [cite: 34]
+        _playbackError.value = null [cite: 34]
+        _queue.value = tracks [cite: 34]
+        rebuildPlayOrder(anchorIndex = startIndex.coerceIn(0, tracks.size - 1)) [cite: 34]
+        _queueIndex.value = playOrder[playOrderPos] [cite: 34]
+        play(tracks[playOrder[playOrderPos]]) [cite: 34]
     }
 
     fun addToQueue(track: Track) {
-        _queue.value = _queue.value + track
-        playOrder = playOrder + (_queue.value.size - 1)
+        _queue.value = _queue.value + track [cite: 35]
+        playOrder = playOrder + (_queue.value.size - 1) [cite: 35]
     }
 
     fun removeFromQueue(index: Int) {
-        if (index !in _queue.value.indices) return
-        val removedTrackWasCurrent = index == _queueIndex.value
-        _queue.value = _queue.value.filterIndexed { i, _ -> i != index }
-        // Rebuild indices/order after the shift
-        rebuildPlayOrder(anchorIndex = (_queueIndex.value - if (index < _queueIndex.value) 1 else 0).coerceIn(0, (_queue.value.size - 1).coerceAtLeast(0)))
+        if (index !in _queue.value.indices) return [cite: 35]
+        val removedTrackWasCurrent = index == _queueIndex.value [cite: 35]
+        _queue.value = _queue.value.filterIndexed { i, _ -> i != index } [cite: 35]
+        rebuildPlayOrder(anchorIndex = (_queueIndex.value - if (index < _queueIndex.value) 1 else 0).coerceIn(0, (_queue.value.size - 1).coerceAtLeast(0))) [cite: 35, 36]
         if (removedTrackWasCurrent && _queue.value.isNotEmpty()) {
-            _queueIndex.value = playOrder[playOrderPos]
-            play(_queue.value[playOrder[playOrderPos]])
+            _queueIndex.value = playOrder[playOrderPos] [cite: 36]
+            play(_queue.value[playOrder[playOrderPos]]) [cite: 36]
         }
     }
 
     fun playQueueItem(index: Int) {
-        val tracks = _queue.value
-        if (index !in tracks.indices) return
-        consecutivePlaybackFailures = 0
-        _playbackError.value = null
-        playOrderPos = playOrder.indexOf(index).coerceAtLeast(0)
-        _queueIndex.value = index
-        play(tracks[index])
+        val tracks = _queue.value [cite: 36]
+        if (index !in tracks.indices) return [cite: 36]
+        consecutivePlaybackFailures = 0 [cite: 36]
+        _playbackError.value = null [cite: 37]
+        playOrderPos = playOrder.indexOf(index).coerceAtLeast(0) [cite: 37]
+        _queueIndex.value = index [cite: 37]
+        play(tracks[index]) [cite: 37]
     }
 
     fun toggleShuffle() {
-        _isShuffleEnabled.value = !_isShuffleEnabled.value
-        rebuildPlayOrder(anchorIndex = _queueIndex.value.coerceAtLeast(0))
+        _isShuffleEnabled.value = !_isShuffleEnabled.value [cite: 37]
+        rebuildPlayOrder(anchorIndex = _queueIndex.value.coerceAtLeast(0)) [cite: 37]
     }
 
     fun cycleRepeatMode() {
-        _repeatMode.value = when (_repeatMode.value) {
-            RepeatMode.OFF -> RepeatMode.ALL
-            RepeatMode.ALL -> RepeatMode.ONE
-            RepeatMode.ONE -> RepeatMode.OFF
+        _repeatMode.value = when (_repeatMode.value) { [cite: 37]
+            RepeatMode.OFF -> RepeatMode.ALL [cite: 37, 38]
+            RepeatMode.ALL -> RepeatMode.ONE [cite: 38]
+            RepeatMode.ONE -> RepeatMode.OFF [cite: 38]
         }
     }
 
     private fun rebuildPlayOrder(anchorIndex: Int) {
-        val tracks = _queue.value
+        val tracks = _queue.value [cite: 38]
         if (tracks.isEmpty()) {
-            playOrder = emptyList()
-            playOrderPos = 0
-            return
+            playOrder = emptyList() [cite: 38]
+            playOrderPos = 0 [cite: 38]
+            return [cite: 39]
         }
-        val safeAnchor = anchorIndex.coerceIn(0, tracks.size - 1)
+        val safeAnchor = anchorIndex.coerceIn(0, tracks.size - 1) [cite: 39]
         playOrder = if (_isShuffleEnabled.value) {
-            val rest = tracks.indices.filter { it != safeAnchor }.shuffled()
-            listOf(safeAnchor) + rest
+            val rest = tracks.indices.filter { it != safeAnchor }.shuffled() [cite: 39]
+            listOf(safeAnchor) + rest [cite: 39]
         } else {
-            tracks.indices.toList()
+            tracks.indices.toList() [cite: 40]
         }
-        playOrderPos = playOrder.indexOf(safeAnchor).coerceAtLeast(0)
+        playOrderPos = playOrder.indexOf(safeAnchor).coerceAtLeast(0) [cite: 40]
     }
 
-    fun skipNext() = advance(1)
-    fun skipPrevious() = advance(-1)
+    fun skipNext() = advance(1) [cite: 40]
+    fun skipPrevious() = advance(-1) [cite: 40]
 
     private fun advance(direction: Int) {
-        val tracks = _queue.value
-        if (tracks.isEmpty()) return
+        val tracks = _queue.value [cite: 40]
+        if (tracks.isEmpty()) return [cite: 40]
 
         if (_repeatMode.value == RepeatMode.ONE) {
-            _currentTrack.value?.let { play(it) }
-            return
+            _currentTrack.value?.let { play(it) } [cite: 40]
+            return [cite: 41]
         }
 
-        val nextPos = playOrderPos + direction
+        val nextPos = playOrderPos + direction [cite: 41]
         when {
             nextPos in playOrder.indices -> {
-                playOrderPos = nextPos
-                val idx = playOrder[playOrderPos]
-                _queueIndex.value = idx
-                play(tracks[idx])
+                playOrderPos = nextPos [cite: 41]
+                val idx = playOrder[playOrderPos] [cite: 41]
+                _queueIndex.value = idx [cite: 42]
+                play(tracks[idx]) [cite: 42]
             }
             direction > 0 && _repeatMode.value == RepeatMode.ALL -> {
-                playOrderPos = 0
-                val idx = playOrder[0]
-                _queueIndex.value = idx
-                play(tracks[idx])
+                playOrderPos = 0 [cite: 42]
+                val idx = playOrder[0] [cite: 42]
+                _queueIndex.value = idx [cite: 43]
+                play(tracks[idx]) [cite: 43]
             }
-            direction > 0 -> triggerAutoplay()
+            direction > 0 -> triggerAutoplay() [cite: 43]
             else -> {
-                // Already at the start; restart current track instead of wrapping.
-                _currentTrack.value?.let { seekTo(0L); if (!_isPlaying.value) resume() }
+                _currentTrack.value?.let { seekTo(0L); if (!_isPlaying.value) resume() } [cite: 44]
             }
         }
     }
 
     private fun triggerAutoplay() {
-        val current = _currentTrack.value ?: return
-        val provider = autoplayProvider ?: return
+        val current = _currentTrack.value ?: return [cite: 44]
+        val provider = autoplayProvider ?: return [cite: 44]
         scope.launch {
-            _isResolvingAutoplay.value = true
+            _isResolvingAutoplay.value = true [cite: 44]
             try {
-                val excludeIds = (_queue.value.map { it.id } + recentlyPlayedIds).toSet()
-                val recentTracks = _queue.value + recentlyPlayedTracks
-                val next = provider(current, excludeIds, recentTracks)
+                val excludeIds = (_queue.value.map { it.id } + recentlyPlayedIds).toSet() [cite: 45]
+                val recentTracks = _queue.value + recentlyPlayedTracks [cite: 45]
+                val next = provider(current, excludeIds, recentTracks) [cite: 45]
                 if (next != null) {
-                    _queue.value = _queue.value + next
-                    val newIndex = _queue.value.size - 1
-                    playOrder = playOrder + newIndex
-                    playOrderPos = playOrder.size - 1
-                    _queueIndex.value = newIndex
-                    play(next)
+                    _queue.value = _queue.value + next [cite: 46]
+                    val newIndex = _queue.value.size - 1 [cite: 46]
+                    playOrder = playOrder + newIndex [cite: 46]
+                    playOrderPos = playOrder.size - 1 [cite: 46]
+                    _queueIndex.value = newIndex [cite: 47]
+                    play(next) [cite: 47]
                 }
             } finally {
-                _isResolvingAutoplay.value = false
+                _isResolvingAutoplay.value = false [cite: 47]
             }
         }
     }
 
     private fun handleTrackEnded() {
         if (!hasReachedPlayingState) {
-            // Reported "ended" without ever actually reaching "playing" - this is
-            // a bad result (e.g. near-zero-length clip), not a real finished song.
-            // Route it through the same breaker as a hard playback error.
-            registerPlaybackFailureAndMaybeStop()
+            registerPlaybackFailureAndMaybeStop() [cite: 50]
             return
         }
-        advance(1)
+        advance(1) [cite: 50]
     }
 
-    /**
-     * Counts one failed playback attempt. Keeps auto-skipping (same as before)
-     * for the first couple of failures in a row, but after
-     * [maxConsecutivePlaybackFailures] gives up instead of cascading forever -
-     * stops the spinner, surfaces [playbackError], and waits for the user to
-     * pick something else rather than silently burning through the whole queue.
-     */
     private fun registerPlaybackFailureAndMaybeStop() {
-        consecutivePlaybackFailures++
+        consecutivePlaybackFailures++ [cite: 52]
         if (consecutivePlaybackFailures >= maxConsecutivePlaybackFailures) {
-            consecutivePlaybackFailures = 0
-            _isBuffering.value = false
-            _isPlaying.value = false
-            _playbackError.value = "Kai gaane play nahi ho paaye, ruk gaya - kuch aur try karein."
-            Log.e("MusicPlayer", "Stopping auto-skip after $maxConsecutivePlaybackFailures playback failures in a row")
+            consecutivePlaybackFailures = 0 [cite: 52]
+            _isBuffering.value = false [cite: 52]
+            _isPlaying.value = false [cite: 52]
+            _playbackError.value = "Kai gaane play nahi ho paaye, ruk gaya - kuch aur try karein." [cite: 52]
+            Log.e("MusicPlayer", "Stopping auto-skip after $maxConsecutivePlaybackFailures playback failures in a row") [cite: 53]
             return
         }
-        advance(1)
+        advance(1) [cite: 53]
     }
-
-    // ---------------- Playback ----------------
 
     private fun trackRecentlyPlayed(track: Track) {
         if (recentlyPlayedIds.lastOrNull() != track.id) {
-            recentlyPlayedIds.addLast(track.id)
-            recentlyPlayedTracks.addLast(track)
-            while (recentlyPlayedIds.size > recentlyPlayedCap) recentlyPlayedIds.removeFirst()
-            while (recentlyPlayedTracks.size > recentlyPlayedCap) recentlyPlayedTracks.removeFirst()
+            recentlyPlayedIds.addLast(track.id) [cite: 54]
+            recentlyPlayedTracks.addLast(track) [cite: 54]
+            while (recentlyPlayedIds.size > recentlyPlayedCap) recentlyPlayedIds.removeFirst() [cite: 54]
+            while (recentlyPlayedTracks.size > recentlyPlayedCap) recentlyPlayedTracks.removeFirst() [cite: 54]
         }
     }
 
     fun play(track: Track) {
-        trackRecentlyPlayed(track)
+        trackRecentlyPlayed(track) [cite: 54]
         if (track.source == TrackSource.YOUTUBE) {
-            playYoutubeTrack(track)
+            playYoutubeTrack(track) [cite: 54]
         } else {
-            playItunesTrack(track)
+            playItunesTrack(track) [cite: 54]
         }
     }
 
     private fun playItunesTrack(track: Track) {
-        cancelBufferingWatchdog()
-        youtubeBridge?.pause()
-        _currentTrack.value = track
-        if (!isApplyingRemote) onLocalSongChange?.invoke(track)
-        _isBuffering.value = true
-        _isPlaying.value = false
-        _playbackPosition.value = 0L
+        cancelBufferingWatchdog() [cite: 55]
+        youtubeBridge?.pause() [cite: 55]
+        _currentTrack.value = track [cite: 55]
+        if (!isApplyingRemote) onLocalSongChange?.invoke(track) [cite: 55]
+        _isBuffering.value = true [cite: 55]
+        _isPlaying.value = false [cite: 55]
+        _playbackPosition.value = 0L [cite: 55]
+        
         runOnController { controller ->
-            controller.setMediaItem(MediaItem.fromUri(track.previewUrl))
-            controller.prepare()
-            controller.play()
+            // System Tray Metadata Setup jisse control centre timeline draw karega
+            val metadata = MediaMetadata.Builder()
+                .setTitle(track.title)
+                .setArtist(track.artist ?: "Unknown Artist")
+                .build()
+
+            val mediaItem = MediaItem.Builder()
+                .setUri(track.previewUrl)
+                .setMediaId(track.id.toString())
+                .setMediaMetadata(metadata)
+                .build()
+
+            controller.setMediaItem(mediaItem) [cite: 56]
+            controller.prepare() [cite: 56]
+            controller.play() [cite: 56]
         }
-        startProgressTracker()
+        startProgressTracker() [cite: 56]
     }
 
     private fun playYoutubeTrack(track: Track) {
-        val videoId = track.youtubeVideoId
+        val videoId = track.youtubeVideoId [cite: 56]
         if (videoId.isNullOrBlank()) {
-            Log.e("MusicPlayer", "YouTube track missing videoId: ${track.title}")
-            return
+            Log.e("MusicPlayer", "YouTube track missing videoId: ${track.title}") [cite: 56]
+            return [cite: 57]
         }
-        runOnController { it.pause() }
-        _currentTrack.value = track
-        if (!isApplyingRemote) onLocalSongChange?.invoke(track)
-        _isBuffering.value = true
-        _isPlaying.value = false
-        _playbackPosition.value = 0L
-        _duration.value = track.durationMs
-        hasReachedPlayingState = false
-        _playbackError.value = null
-        loadedYoutubeVideoId = videoId
-        youtubeBridge?.loadVideo(videoId)
-        startBufferingWatchdog(videoId)
+        runOnController { it.pause() } [cite: 57]
+        _currentTrack.value = track [cite: 57]
+        if (!isApplyingRemote) onLocalSongChange?.invoke(track) [cite: 57]
+        _isBuffering.value = true [cite: 57]
+        _isPlaying.value = false [cite: 57]
+        _playbackPosition.value = 0L [cite: 57]
+        _duration.value = track.durationMs [cite: 57]
+        hasReachedPlayingState = false [cite: 57]
+        _playbackError.value = null [cite: 58]
+        loadedYoutubeVideoId = videoId [cite: 58]
+        youtubeBridge?.loadVideo(videoId) [cite: 58]
+        startBufferingWatchdog(videoId) [cite: 58]
     }
 
-    /**
-     * If we're still buffering this exact video after [bufferingTimeoutMs] with
-     * no onStateChange/onError ever having arrived (e.g. the WebView failed to
-     * load youtube.com/iframe_api on a bad connection), the spinner would
-     * otherwise spin forever with no way out. Treat it as a failed play
-     * attempt and route it through the normal auto-skip breaker instead.
-     */
     private fun startBufferingWatchdog(videoId: String) {
-        bufferingWatchdogJob?.cancel()
+        bufferingWatchdogJob?.cancel() [cite: 61]
         bufferingWatchdogJob = scope.launch {
-            delay(bufferingTimeoutMs)
-            if (loadedYoutubeVideoId == videoId && _isBuffering.value && !hasReachedPlayingState) {
-                Log.e("MusicPlayer", "Buffering timed out for videoId=$videoId - treating as failed playback")
-                _isBuffering.value = false
-                registerPlaybackFailureAndMaybeStop()
+            delay(bufferingTimeoutMs) [cite: 61]
+            if (loadedYoutubeVideoId == videoId && _isBuffering.value && !hasReachedPlayingState) { [cite: 61]
+                Log.e("MusicPlayer", "Buffering timed out for videoId=$videoId - treating as failed playback") [cite: 61]
+                _isBuffering.value = false [cite: 62]
+                registerPlaybackFailureAndMaybeStop() [cite: 62]
             }
         }
     }
 
     private fun cancelBufferingWatchdog() {
-        bufferingWatchdogJob?.cancel()
-        bufferingWatchdogJob = null
+        bufferingWatchdogJob?.cancel() [cite: 62]
+        bufferingWatchdogJob = null [cite: 62]
     }
 
     fun pause() {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
-            youtubeBridge?.pause()
+            youtubeBridge?.pause() [cite: 63]
         } else {
-            runOnController { it.pause() }
+            runOnController { it.pause() } [cite: 63]
         }
     }
 
     fun resume() {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
-            youtubeBridge?.play()
+            youtubeBridge?.play() [cite: 63]
         } else {
-            runOnController { it.play() }
+            runOnController { it.play() } [cite: 64]
         }
     }
 
-    /** Called by the UI once it has shown [playbackError] to the user (e.g. after a Snackbar dismisses). */
     fun clearPlaybackError() {
-        _playbackError.value = null
+        _playbackError.value = null [cite: 65]
     }
 
     fun stop() {
-        stopProgressTracker()
-        runOnController { it.stop() }
-        youtubeBridge?.pause()
-        _isPlaying.value = false
-        _playbackPosition.value = 0L
+        stopProgressTracker() [cite: 65]
+        runOnController { it.stop() } [cite: 65]
+        youtubeBridge?.pause() [cite: 65]
+        _isPlaying.value = false [cite: 65]
+        _playbackPosition.value = 0L [cite: 65]
     }
 
-    /**
-     * Stops playback AND clears the current track, so the mini player / bottom
-     * tray (which only shows while currentTrack != null) disappears entirely.
-     * Used by the tray's close ("X") button.
-     */
     fun stopAndDismiss() {
-        stop()
-        _currentTrack.value = null
+        stop() [cite: 67]
+        _currentTrack.value = null [cite: 67]
     }
 
     fun seekTo(position: Long) {
         if (_currentTrack.value?.source == TrackSource.YOUTUBE) {
-            youtubeBridge?.seekTo(position / 1000f)
+            youtubeBridge?.seekTo(position / 1000f) [cite: 67]
         } else {
-            runOnController { it.seekTo(position) }
+            runOnController { it.seekTo(position) } [cite: 68]
         }
-        _playbackPosition.value = position
-        if (!isApplyingRemote) onLocalSeek?.invoke(position)
+        _playbackPosition.value = position [cite: 68]
+        if (!isApplyingRemote) onLocalSeek?.invoke(position) [cite: 68]
     }
 
-    /** Called by YouTubePlayerHost's JS bridge when the IFrame player's state changes. */
     fun onYoutubePlayerStateChanged(state: Int, currentTimeSec: Double, durationSec: Double, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        // Stale event from a video we've since swapped out (loadVideoById() can
-        // fire a trailing callback for the OUTGOING video right as a new one is
-        // requested) - without this check it could be misread as the new
-        // track's own state, e.g. "ended" the instant it starts.
-        if (videoId != loadedYoutubeVideoId) return
+        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return [cite: 69]
+        if (videoId != loadedYoutubeVideoId) return [cite: 70]
         when (state) {
-            1 -> { // playing
-                _isPlaying.value = true
-                _isBuffering.value = false
-                hasReachedPlayingState = true
-                consecutivePlaybackFailures = 0
-                cancelBufferingWatchdog()
-                if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
-                else onLocalPlayPause?.invoke(true, (currentTimeSec * 1000).toLong())
+            1 -> { 
+                _isPlaying.value = true [cite: 70]
+                _isBuffering.value = false [cite: 70]
+                hasReachedPlayingState = true [cite: 70]
+                consecutivePlaybackFailures = 0 [cite: 71]
+                cancelBufferingWatchdog() [cite: 71]
+                if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false [cite: 71]
+                else onLocalPlayPause?.invoke(true, (currentTimeSec * 1000).toLong()) [cite: 71]
             }
-            2 -> { // paused
-                _isPlaying.value = false
-                _isBuffering.value = false
-                if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
-                else onLocalPlayPause?.invoke(false, (currentTimeSec * 1000).toLong())
+            2 -> { 
+                _isPlaying.value = false [cite: 72]
+                _isBuffering.value = false [cite: 72]
+                if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false [cite: 72]
+                else onLocalPlayPause?.invoke(false, (currentTimeSec * 1000).toLong()) [cite: 72]
             }
-            3 -> _isBuffering.value = true // buffering
-            0 -> { cancelBufferingWatchdog(); handleTrackEnded() } // ended
+            3 -> _isBuffering.value = true [cite: 72]
+            0 -> { cancelBufferingWatchdog(); handleTrackEnded() } [cite: 73, 74]
         }
-        if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
+        if (durationSec > 0) _duration.value = (durationSec * 1000).toLong() [cite: 74]
     }
 
-    /** Called periodically by YouTubePlayerHost's JS bridge while a video is loaded. */
     fun onYoutubeTimeUpdate(currentTimeSec: Double, durationSec: Double, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        if (videoId != loadedYoutubeVideoId) return
-        _playbackPosition.value = (currentTimeSec * 1000).toLong()
-        if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
+        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return [cite: 75]
+        if (videoId != loadedYoutubeVideoId) return [cite: 75]
+        _playbackPosition.value = (currentTimeSec * 1000).toLong() [cite: 75]
+        if (durationSec > 0) _duration.value = (durationSec * 1000).toLong() [cite: 75]
     }
 
-    /**
-     * Called by YouTubePlayerHost's JS bridge when the IFrame player fails to load
-     * or play a video (embedding disallowed by the uploader, video removed/private,
-     * region-locked, etc.). Previously nothing listened for this - isBuffering had
-     * already been set true right before loadVideo() and nothing ever cleared it,
-     * so a failed video looked exactly like "stuck buffering forever" in the UI.
-     * Now: clear the spinner and skip to the next track, same as a natural track end.
-     */
     fun onYoutubePlayerError(errorCode: Int, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        if (videoId != loadedYoutubeVideoId) return
-        Log.e("MusicPlayer", "YouTube playback error $errorCode for '${_currentTrack.value?.title}' - skipping")
-        cancelBufferingWatchdog()
-        _isBuffering.value = false
-        _isPlaying.value = false
-        registerPlaybackFailureAndMaybeStop()
+        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return [cite: 79]
+        if (videoId != loadedYoutubeVideoId) return [cite: 79]
+        Log.e("MusicPlayer", "YouTube playback error $errorCode for '${_currentTrack.value?.title}' - skipping") [cite: 79]
+        cancelBufferingWatchdog() [cite: 79]
+        _isBuffering.value = false [cite: 79]
+        _isPlaying.value = false [cite: 79]
+        registerPlaybackFailureAndMaybeStop() [cite: 79]
     }
 
-    // ---------------- Jam (remote) sync ----------------
-
-    /** Mirrors a song change that arrived from a Jam partner (does not re-broadcast). */
     fun applyRemoteSongChange(song: Song) {
-        isApplyingRemote = true
+        isApplyingRemote = true [cite: 81]
         try {
-            play(TrackSongBridge.toTrack(song))
+            play(TrackSongBridge.toTrack(song)) [cite: 81]
         } finally {
-            isApplyingRemote = false
+            isApplyingRemote = false [cite: 81]
         }
     }
 
-    /** Mirrors a play/pause that arrived from a Jam partner (does not re-broadcast). */
     fun applyRemotePlayPause(isPlaying: Boolean, positionMs: Long) {
-        isApplyingRemote = true
-        suppressNextPlayPauseBroadcast = true
+        isApplyingRemote = true [cite: 82]
+        suppressNextPlayPauseBroadcast = true [cite: 82]
         try {
-            seekTo(positionMs)
-            if (isPlaying) resume() else pause()
+            seekTo(positionMs) [cite: 82]
+            if (isPlaying) resume() else pause() [cite: 82]
         } finally {
-            isApplyingRemote = false
+            isApplyingRemote = false [cite: 82]
         }
     }
 
-    /** Mirrors a seek that arrived from a Jam partner (does not re-broadcast). */
     fun applyRemoteSeek(positionMs: Long) {
-        isApplyingRemote = true
+        isApplyingRemote = true [cite: 84]
         try {
-            seekTo(positionMs)
+            seekTo(positionMs) [cite: 84]
         } finally {
-            isApplyingRemote = false
+            isApplyingRemote = false [cite: 84]
         }
     }
-
-    // ---------------- Progress polling ----------------
 
     private fun startProgressTracker() {
-        stopProgressTracker()
+        stopProgressTracker() [cite: 84]
         progressJob = scope.launch {
             while (true) {
                 if (_currentTrack.value?.source == TrackSource.ITUNES) {
                     mediaController?.let {
-                        if (it.isPlaying) _playbackPosition.value = it.currentPosition.coerceAtLeast(0L)
+                        if (it.isPlaying) _playbackPosition.value = it.currentPosition.coerceAtLeast(0L) [cite: 85]
                     }
                 }
-                delay(500)
+                // Delay 1000ms kiya taaki main-thread composition smooth ho aur constant lock refresh drop na kare
+                delay(1000)
             }
         }
     }
 
     private fun stopProgressTracker() {
-        progressJob?.cancel()
-        progressJob = null
+        progressJob?.cancel() [cite: 86]
+        progressJob = null [cite: 86]
     }
 
     fun release() {
-        stopProgressTracker()
-        cancelBufferingWatchdog()
-        mediaController?.release()
-        mediaController = null
+        stopProgressTracker() [cite: 87]
+        cancelBufferingWatchdog() [cite: 87]
+        mediaController?.release() [cite: 87]
+        mediaController = null [cite: 87]
     }
 }
 
-/**
- * Shared UI-facing state for the Samples Vertical Swipe Feed. Each visible/adjacent
- * feed page owns its OWN Media3 ExoPlayer instance (see SampleVideoPage in
- * SamplesScreen.kt) so 1 page ahead is always pre-buffered - swiping to it is
- * instant, no reload/lag. Only the currently active page's player reports its
- * state in here (and receives play/pause taps via [activePlayer]).
- *
- * Using Media3's PlayerView (useController = false) instead of the old VideoView
- * also fixes the "can't scroll" bug: VideoView intercepted touch/drag gestures
- * before Compose's VerticalPager could see them; PlayerView without its own
- * controls does not.
- */
 class SamplesPlayerManager {
-    private val _isPlaying = MutableStateFlow(false)
-    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
+    private val _isPlaying = MutableStateFlow(false) [cite: 91]
+    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow() [cite: 91]
 
-    private val _playbackPosition = MutableStateFlow(0L)
-    val playbackPosition: StateFlow<Long> = _playbackPosition.asStateFlow()
+    private val _playbackPosition = MutableStateFlow(0L) [cite: 91]
+    val playbackPosition: StateFlow<Long> = _playbackPosition.asStateFlow() [cite: 91]
 
-    private val _duration = MutableStateFlow(0L)
-    val duration: StateFlow<Long> = _duration.asStateFlow()
+    private val _duration = MutableStateFlow(0L) [cite: 91]
+    val duration: StateFlow<Long> = _duration.asStateFlow() [cite: 91]
 
-    private val _isBuffering = MutableStateFlow(true)
-    val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow()
+    private val _isBuffering = MutableStateFlow(true) [cite: 91]
+    val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow() [cite: 91]
 
-    /** The currently active page's ExoPlayer - tap-to-pause controls this directly. */
-    var activePlayer: androidx.media3.exoplayer.ExoPlayer? = null
+    var activePlayer: androidx.media3.exoplayer.ExoPlayer? = null [cite: 92]
 
     fun reportActiveState(isPlaying: Boolean, isBuffering: Boolean, positionMs: Long, durationMs: Long) {
-        _isPlaying.value = isPlaying
-        _isBuffering.value = isBuffering
-        _playbackPosition.value = positionMs
-        if (durationMs > 0) _duration.value = durationMs
+        _isPlaying.value = isPlaying [cite: 92]
+        _isBuffering.value = isBuffering [cite: 92]
+        _playbackPosition.value = positionMs [cite: 92]
+        if (durationMs > 0) _duration.value = durationMs [cite: 92]
     }
 
     fun togglePlayPause() {
-        val player = activePlayer ?: return
-        if (player.isPlaying) player.pause() else player.play()
+        val player = activePlayer ?: return [cite: 92]
+        if (player.isPlaying) player.pause() else player.play() [cite: 92, 93]
     }
 
     fun pause() {
-        activePlayer?.pause()
+        activePlayer?.pause() [cite: 93]
     }
 }
