@@ -107,7 +107,7 @@ fun AuthScreen(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = "HARMONIX",
+                        text = "NIRVANA",
                         fontSize = 36.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
