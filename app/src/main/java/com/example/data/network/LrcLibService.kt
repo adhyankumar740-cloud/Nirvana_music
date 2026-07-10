@@ -22,7 +22,7 @@ interface LrcLibService {
     suspend fun search(
         @Query("track_name") trackName: String,
         @Query("artist_name") artistName: String,
-        @Header("User-Agent") userAgent: String = "Harmonix/1.0 (Android music app)"
+        @Header("User-Agent") userAgent: String = "Nirvana/1.0 (Android music app)"
     ): List<LrcLibResult>
 
     companion object {
