@@ -87,6 +87,67 @@ data class PlayHistoryEntity(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+/**
+ * A user-created playlist. Tracks live in [PlaylistTrackEntity], keyed by
+ * (playlistId, trackId) - so a playlist owns its own snapshot of each track's
+ * fields and doesn't break if the track is later removed from Favorites/Downloads.
+ */
+@Entity(tableName = "playlists")
+data class PlaylistEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+/** One track inside one playlist. Composite key so a track can't be added twice to the same playlist. */
+@Entity(tableName = "playlist_tracks", primaryKeys = ["playlistId", "trackId"])
+data class PlaylistTrackEntity(
+    val playlistId: Long,
+    val trackId: Long,
+    val title: String,
+    val artist: String,
+    val album: String,
+    val previewUrl: String,
+    val artworkUrl: String,
+    val durationMs: Long,
+    val genre: String,
+    val source: String = "ITUNES",
+    val youtubeVideoId: String? = null,
+    val isVideo: Boolean = false,
+    val addedAt: Long = System.currentTimeMillis()
+) {
+    fun toTrack(): Track = Track(
+        id = trackId,
+        title = title,
+        artist = artist,
+        album = album,
+        previewUrl = previewUrl,
+        artworkUrl = artworkUrl,
+        durationMs = durationMs,
+        genre = genre,
+        source = if (source == "YOUTUBE") TrackSource.YOUTUBE else TrackSource.ITUNES,
+        youtubeVideoId = youtubeVideoId,
+        isVideo = isVideo
+    )
+
+    companion object {
+        fun fromTrack(playlistId: Long, track: Track) = PlaylistTrackEntity(
+            playlistId = playlistId,
+            trackId = track.id,
+            title = track.title,
+            artist = track.artist,
+            album = track.album,
+            previewUrl = track.previewUrl,
+            artworkUrl = track.artworkUrl,
+            durationMs = track.durationMs,
+            genre = track.genre,
+            source = track.source.name,
+            youtubeVideoId = track.youtubeVideoId,
+            isVideo = track.isVideo
+        )
+    }
+}
+
 @Entity(tableName = "chat_messages")
 data class ChatMessageEntity(
     @PrimaryKey val id: String,
