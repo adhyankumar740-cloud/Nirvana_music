@@ -96,6 +96,8 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          RELAY_BASE_URL: ${{ secrets.RELAY_BASE_URL }}
+          RELAY_API_KEY: ${{ secrets.RELAY_API_KEY }}
         run: |
           rm -f .env
           if [ -n "$GEMINI_API_KEY" ]; then
@@ -103,6 +105,12 @@ jobs:
           fi
           if [ -n "$YOUTUBE_API_KEY" ]; then
             echo "YOUTUBE_API_KEY=$YOUTUBE_API_KEY" >> .env
+          fi
+          if [ -n "$RELAY_BASE_URL" ]; then
+            echo "RELAY_BASE_URL=$RELAY_BASE_URL" >> .env
+          fi
+          if [ -n "$RELAY_API_KEY" ]; then
+            echo "RELAY_API_KEY=$RELAY_API_KEY" >> .env
           fi
           if [ -f .env ]; then
             echo "Wrote .env from repository secrets."
