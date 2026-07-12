@@ -5,6 +5,7 @@ import com.example.BuildConfig
 import com.example.data.database.MusicDatabase
 import com.example.data.network.ITunesService
 import com.example.data.network.LrcLibService
+import com.example.data.network.RelayService
 import com.example.data.network.YouTubeService
 import com.example.data.repository.MusicRepository
 import com.example.jam.JamChatManager
@@ -28,6 +29,10 @@ class AppContainer(private val context: Context) {
 
     val lrcLibService: LrcLibService by lazy {
         LrcLibService.create()
+    }
+
+    val relayService: RelayService by lazy {
+        RelayService.create(BuildConfig.RELAY_BASE_URL)
     }
 
     val musicRepository: MusicRepository by lazy {
@@ -54,7 +59,7 @@ class AppContainer(private val context: Context) {
     }
 
     val musicPlayer: MusicPlayer by lazy {
-        MusicPlayer(context)
+        MusicPlayer(context, relayService, BuildConfig.RELAY_API_KEY)
     }
 
     val samplesPlayerManager: SamplesPlayerManager by lazy {
