@@ -15,7 +15,9 @@ import com.example.data.model.parseSyncedLyrics
 import com.example.data.model.toTrack
 import com.example.data.network.ITunesService
 import com.example.data.network.LrcLibService
+import com.example.data.network.RelayService
 import com.example.data.network.YouTubeService
+import com.example.data.network.toTrack as relayTrackToTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -75,6 +77,8 @@ class MusicRepository(
     private val apiService: ITunesService,
     private val youtubeService: YouTubeService,
     private val youtubeApiKey: String,
+    private val relayService: RelayService,
+    private val relayApiKey: String,
     private val lrcLibService: LrcLibService,
     private val savedTrackDao: SavedTrackDao,
     private val searchHistoryDao: SearchHistoryDao,
@@ -259,14 +263,14 @@ class MusicRepository(
     }.flowOn(Dispatchers.IO)
 
     /**
-     * Home Search - now backed by the YouTube Data API v3 so users can find and play
-     * full songs (not just 30s previews). Two calls: `search` for matches, then
-     * `videos` (batched) to pull real durations, since search results don't include them.
+     * Home Search - PRIMARY source is the BrokenX relay's /search (youtube_search,
+     * no Google quota key). Falls back to the YouTube Data API v3 only if the
+     * relay call fails (down, timeout, 401/502 etc.), so search still works.
      */
     fun searchTracks(query: String): Flow<SearchOutcome> = flow {
         val cacheKey = query.trim().lowercase()
 
-        // Serve repeats from cache instead of spending another 100 quota units
+        // Serve repeats from cache instead of spending another relay/quota call
         // on a search we already have the answer to.
         searchResultsCache[cacheKey]?.let { cached ->
             val reenriched = cached.map { track ->
@@ -281,16 +285,8 @@ class MusicRepository(
         }
 
         try {
-            val searchResponse = youtubeService.search(query = query, maxResults = 25, apiKey = youtubeApiKey)
-            val videoIds = searchResponse.items.mapNotNull { it.id?.videoId }
-            if (videoIds.isEmpty()) {
-                searchResultsCache[cacheKey] = emptyList()
-                emit(SearchOutcome.Success(emptyList()))
-                return@flow
-            }
-
-            val detailsResponse = youtubeService.getVideoDetails(ids = videoIds.joinToString(","), apiKey = youtubeApiKey)
-            val tracks = detailsResponse.items.map { it.toTrack() }
+            val relayResponse = relayService.search(query = query, limit = 25, relayKey = relayApiKey.ifBlank { null })
+            val tracks = relayResponse.results.map { it.relayTrackToTrack() }
             val enriched = tracks.map { track ->
                 val localEntity = savedTrackDao.getSavedTrackById(track.id)
                 track.copy(
@@ -298,13 +294,35 @@ class MusicRepository(
                     isFavorite = localEntity?.isFavorite ?: false
                 )
             }
-            // Only cache genuine successes - never cache a quota/network failure,
-            // so the next attempt (e.g. after the quota resets) can try for real.
             searchResultsCache[cacheKey] = tracks
             emit(SearchOutcome.Success(enriched))
-        } catch (e: Exception) {
-            e.printStackTrace()
-            emit(SearchOutcome.Error(searchErrorMessage(e)))
+        } catch (relayError: Exception) {
+            relayError.printStackTrace()
+            // SECONDARY/fallback: relay /search down, timeout, 401/502 etc.
+            try {
+                val searchResponse = youtubeService.search(query = query, maxResults = 25, apiKey = youtubeApiKey)
+                val videoIds = searchResponse.items.mapNotNull { it.id?.videoId }
+                if (videoIds.isEmpty()) {
+                    searchResultsCache[cacheKey] = emptyList()
+                    emit(SearchOutcome.Success(emptyList()))
+                    return@flow
+                }
+
+                val detailsResponse = youtubeService.getVideoDetails(ids = videoIds.joinToString(","), apiKey = youtubeApiKey)
+                val tracks = detailsResponse.items.map { it.toTrack() }
+                val enriched = tracks.map { track ->
+                    val localEntity = savedTrackDao.getSavedTrackById(track.id)
+                    track.copy(
+                        isDownloaded = localEntity?.isDownloaded ?: false,
+                        isFavorite = localEntity?.isFavorite ?: false
+                    )
+                }
+                searchResultsCache[cacheKey] = tracks
+                emit(SearchOutcome.Success(enriched))
+            } catch (fallbackError: Exception) {
+                fallbackError.printStackTrace()
+                emit(SearchOutcome.Error(searchErrorMessage(fallbackError)))
+            }
         }
     }.flowOn(Dispatchers.IO)
 
@@ -323,17 +341,23 @@ class MusicRepository(
         else -> "Search failed. Please try again."
     }
 
-    /** Finds the single best-matching YouTube video for a title+artist (used by Samples' "Play Full Song" button). */
+    /** Finds the single best-matching video for a title+artist (used by Samples' "Play Full Song" button). Relay first, YouTube Data API as fallback. */
     suspend fun findBestYouTubeMatch(title: String, artist: String): Track? = withContext(Dispatchers.IO) {
+        val query = "$title $artist"
         try {
-            val query = "$title $artist"
-            val searchResponse = youtubeService.search(query = query, maxResults = 5, apiKey = youtubeApiKey)
-            val videoId = searchResponse.items.firstNotNullOfOrNull { it.id?.videoId } ?: return@withContext null
-            val detailsResponse = youtubeService.getVideoDetails(ids = videoId, apiKey = youtubeApiKey)
-            detailsResponse.items.firstOrNull()?.toTrack()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
+            val relayResponse = relayService.search(query = query, limit = 1, relayKey = relayApiKey.ifBlank { null })
+            relayResponse.results.firstOrNull()?.relayTrackToTrack()
+        } catch (relayError: Exception) {
+            relayError.printStackTrace()
+            try {
+                val searchResponse = youtubeService.search(query = query, maxResults = 5, apiKey = youtubeApiKey)
+                val videoId = searchResponse.items.firstNotNullOfOrNull { it.id?.videoId } ?: return@withContext null
+                val detailsResponse = youtubeService.getVideoDetails(ids = videoId, apiKey = youtubeApiKey)
+                detailsResponse.items.firstOrNull()?.toTrack()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            }
         }
     }
 
@@ -411,15 +435,30 @@ class MusicRepository(
             ).filter { it.isNotBlank() }.distinct()
 
             for (query in queries) {
-                val searchResponse = youtubeService.search(query = query, maxResults = 15, apiKey = youtubeApiKey)
-                val videoIds = searchResponse.items.mapNotNull { it.id?.videoId }
-                    .filter { it.hashCode().toLong() !in excludeIds }
-                if (videoIds.isEmpty()) continue
+                val candidateTracks: List<Track> = try {
+                    relayService.search(query = query, limit = 15, relayKey = relayApiKey.ifBlank { null })
+                        .results.map { it.relayTrackToTrack() }
+                } catch (relayError: Exception) {
+                    relayError.printStackTrace()
+                    try {
+                        val searchResponse = youtubeService.search(query = query, maxResults = 15, apiKey = youtubeApiKey)
+                        val videoIds = searchResponse.items.mapNotNull { it.id?.videoId }
+                            .filter { it.hashCode().toLong() !in excludeIds }
+                        if (videoIds.isEmpty()) {
+                            emptyList()
+                        } else {
+                            val detailsResponse = youtubeService.getVideoDetails(ids = videoIds.take(10).joinToString(","), apiKey = youtubeApiKey)
+                            detailsResponse.items.map { it.toTrack() }
+                        }
+                    } catch (fallbackError: Exception) {
+                        fallbackError.printStackTrace()
+                        emptyList()
+                    }
+                }
 
-                val detailsResponse = youtubeService.getVideoDetails(ids = videoIds.take(10).joinToString(","), apiKey = youtubeApiKey)
-                val candidate = detailsResponse.items
-                    .map { it.toTrack() }
-                    .firstOrNull { it.id !in excludeIds && normalizedSongKey(it) !in excludeKeys }
+                val candidate = candidateTracks
+                    .filter { it.id !in excludeIds }
+                    .firstOrNull { normalizedSongKey(it) !in excludeKeys }
                 // Carry the resolved genre forward so the next hop in an autoplay
                 // chain doesn't have to re-look it up and doesn't drift genre.
                 if (candidate != null) return@withContext candidate.copy(genre = genre)
