@@ -4,10 +4,13 @@ import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionResult
+import com.example.BuildConfig
 
 class PlaybackService : MediaSessionService() {
 
@@ -65,7 +68,18 @@ class PlaybackService : MediaSessionService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
+        // Relay ka /audio/{filename} endpoint bhi X-Relay-Key maangta hai, aur
+        // ExoPlayer seedha (app backend se hoke nahi) us URL ko hit karta hai -
+        // isliye header yahan ExoPlayer ke HTTP data source pe default request
+        // property ke roop me lagana zaroori hai.
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory().apply {
+            if (BuildConfig.RELAY_API_KEY.isNotBlank()) {
+                setDefaultRequestProperties(mapOf("X-Relay-Key" to BuildConfig.RELAY_API_KEY))
+            }
+        }
+
         player = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(httpDataSourceFactory))
             .setAudioAttributes(audioAttributes, false) // silent track hai, isko audio focus fight karne ki zaroorat nahi
             .setHandleAudioBecomingNoisy(true)
             .build()
