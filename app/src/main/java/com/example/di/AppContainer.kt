@@ -40,6 +40,8 @@ class AppContainer(private val context: Context) {
             apiService = apiService,
             youtubeService = youtubeService,
             youtubeApiKey = BuildConfig.YOUTUBE_API_KEY,
+            relayService = relayService,
+            relayApiKey = BuildConfig.RELAY_API_KEY,
             lrcLibService = lrcLibService,
             savedTrackDao = database.savedTrackDao(),
             searchHistoryDao = database.searchHistoryDao(),
