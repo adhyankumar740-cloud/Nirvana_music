@@ -1,5 +1,7 @@
 package com.example.data.network
 
+import com.example.data.model.Track
+import com.example.data.model.TrackSource
 import com.squareup.moshi.JsonClass
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -18,13 +20,35 @@ data class RelayResolveResponse(
     val stream_url: String
 )
 
+@JsonClass(generateAdapter = true)
+data class RelaySearchTrack(
+    val video_id: String,
+    val title: String,
+    val artist: String,
+    val thumbnail: String,
+    val duration_sec: Int
+)
+
+@JsonClass(generateAdapter = true)
+data class RelaySearchResponse(
+    val query: String,
+    val results: List<RelaySearchTrack>
+)
+
 /**
- * Talks to the BrokenX relay backend (Revo-music's app.py /resolve endpoint) -
- * the PRIMARY audio source for YOUTUBE-source tracks. Falls back to the
- * WebView/IFrame player (see MusicPlayer.playYoutubeViaWebViewFallback) only
- * if this fails.
+ * Talks to the BrokenX relay backend (Revo-music's app.py) - PRIMARY source
+ * for both search/metadata (/search, via youtube_search - no Google API key)
+ * and audio (/resolve). Falls back to YouTube Data API for search and to the
+ * WebView/IFrame player for playback only if the relay call fails.
  */
 interface RelayService {
+
+    @GET("search")
+    suspend fun search(
+        @Query("query") query: String,
+        @Query("limit") limit: Int = 20,
+        @Header("X-Relay-Key") relayKey: String?
+    ): RelaySearchResponse
 
     @GET("resolve")
     suspend fun resolve(
@@ -61,3 +85,23 @@ interface RelayService {
         }
     }
 }
+
+/**
+ * Converts a relay /search result into the app's unified [Track] model.
+ * Uses the SAME id scheme as YouTubeVideoDetailItem.toTrack()
+ * (videoId.hashCode()) so favorites/downloads/history stay consistent
+ * regardless of whether a video was found via the relay or the YouTube
+ * Data API fallback.
+ */
+fun RelaySearchTrack.toTrack(): Track = Track(
+    id = video_id.hashCode().toLong(),
+    title = title,
+    artist = artist,
+    album = "YouTube",
+    previewUrl = "",
+    artworkUrl = thumbnail,
+    durationMs = duration_sec * 1000L,
+    genre = "Music",
+    source = TrackSource.YOUTUBE,
+    youtubeVideoId = video_id
+)
