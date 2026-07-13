@@ -75,6 +75,7 @@ data class PlaylistImportResult(
 class MusicRepository(
     private val apiService: ITunesService,
     private val relayService: RelayService,
+    private val relayApiKey: String,
     private val lrcLibService: LrcLibService,
     private val savedTrackDao: SavedTrackDao,
     private val searchHistoryDao: SearchHistoryDao,
@@ -281,7 +282,7 @@ class MusicRepository(
         }
 
         try {
-            val relayResponse = relayService.search(query = query, limit = 25)
+            val relayResponse = relayService.search(query = query, limit = 25, relayKey = relayApiKey.ifBlank { null })
             val tracks = relayResponse.results.map { it.relayTrackToTrack() }
             val enriched = tracks.map { track ->
                 val localEntity = savedTrackDao.getSavedTrackById(track.id)
@@ -314,7 +315,7 @@ class MusicRepository(
     /** Finds the single best-matching video for a title+artist (used by Samples' "Play Full Song" button). */
     suspend fun findBestYouTubeMatch(title: String, artist: String): Track? = withContext(Dispatchers.IO) {
         try {
-            val relayResponse = relayService.search(query = "$title $artist", limit = 1)
+            val relayResponse = relayService.search(query = "$title $artist", limit = 1, relayKey = relayApiKey.ifBlank { null })
             relayResponse.results.firstOrNull()?.relayTrackToTrack()
         } catch (e: Exception) {
             e.printStackTrace()
@@ -397,7 +398,7 @@ class MusicRepository(
 
             for (query in queries) {
                 val candidateTracks: List<Track> = try {
-                    relayService.search(query = query, limit = 15)
+                    relayService.search(query = query, limit = 15, relayKey = relayApiKey.ifBlank { null })
                         .results.map { it.relayTrackToTrack() }
                 } catch (e: Exception) {
                     e.printStackTrace()
