@@ -35,7 +35,8 @@ interface YouTubePlayerBridge {
 
 class MusicPlayer(
     private val context: Context,
-    private val relayService: RelayService
+    private val relayService: RelayService,
+    private val relayApiKey: String
 ) {
 
     private var mediaController: MediaController? = null
@@ -417,7 +418,7 @@ class MusicPlayer(
         scope.launch {
             try {
                 val response = withContext(Dispatchers.IO) {
-                    relayService.resolve(videoId = videoId)
+                    relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
                 }
                 if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
                 isRelayAudio = true
