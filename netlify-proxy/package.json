@@ -1,0 +1,9 @@
+{
+  "name": "nirvana-relay-proxy",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Netlify proxy for Nirvana/Harmonix music app - hides the YouTube Data API key and relay backend URL/key from the Android app.",
+  "engines": {
+    "node": ">=18"
+  }
+}
