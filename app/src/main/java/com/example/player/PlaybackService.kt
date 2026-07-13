@@ -10,6 +10,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionResult
+import com.example.BuildConfig
 
 class PlaybackService : MediaSessionService() {
 
@@ -67,16 +68,15 @@ class PlaybackService : MediaSessionService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        // No relay key is embedded in the app anymore (see /netlify-proxy) -
-        // ExoPlayer fetches the resolved stream_url directly with no auth
-        // header. NOTE: if your relay backend's own audio-file endpoint (the
-        // URL returned as stream_url) requires that same key to fetch the raw
-        // bytes - not just to call /resolve - ExoPlayer's direct request here
-        // will fail, since it bypasses the Netlify proxy entirely. In that
-        // case either point stream_url at an unauthenticated/signed CDN URL
-        // from your relay, or add a third Netlify Function that streams the
-        // audio bytes with the key attached server-side.
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+        // Relay ka /audio/{filename} endpoint bhi X-Relay-Key maangta hai, aur
+        // ExoPlayer seedha (app backend se hoke nahi) us URL ko hit karta hai -
+        // isliye header yahan ExoPlayer ke HTTP data source pe default request
+        // property ke roop me lagana zaroori hai.
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory().apply {
+            if (BuildConfig.RELAY_API_KEY.isNotBlank()) {
+                setDefaultRequestProperties(mapOf("X-Relay-Key" to BuildConfig.RELAY_API_KEY))
+            }
+        }
 
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpDataSourceFactory))
