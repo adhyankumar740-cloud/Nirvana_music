@@ -12,6 +12,7 @@ import com.example.data.model.Song
 import com.example.data.model.Track
 import com.example.data.model.TrackSongBridge
 import com.example.data.model.TrackSource
+import com.example.data.network.RelayResolveResponse
 import com.example.data.network.RelayService
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.CoroutineScope
@@ -111,6 +112,19 @@ class MusicPlayer(
 
     private var bufferingWatchdogJob: Job? = null
     private val bufferingTimeoutMs = 12_000L
+
+    // --- Next-track preloading (removes the relay-resolve wait when advancing) ---
+    // The relay's /resolve endpoint can be slow on a cold cache (it downloads/
+    // converts the video from YouTube on first resolve for that videoId), which
+    // is exactly the pause users saw between songs. As soon as a track starts
+    // playing, we resolve the *next* track's stream URL in the background and
+    // cache it here, so by the time skipNext()/auto-advance actually happens,
+    // the URL is usually already sitting in the cache and playback can start
+    // immediately instead of waiting on a fresh network round trip.
+    private val preloadedStreamUrls = object : LinkedHashMap<String, String>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 5
+    }
+    private var preloadJob: Job? = null
 
     private var progressJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Main + Job())
@@ -257,6 +271,7 @@ class MusicPlayer(
     fun addToQueue(track: Track) {
         _queue.value = _queue.value + track
         playOrder = playOrder + (_queue.value.size - 1)
+        preloadNextTrack()
     }
 
     fun removeFromQueue(index: Int) {
@@ -283,6 +298,7 @@ class MusicPlayer(
     fun toggleShuffle() {
         _isShuffleEnabled.value = !_isShuffleEnabled.value
         rebuildPlayOrder(anchorIndex = _queueIndex.value.coerceAtLeast(0))
+        preloadNextTrack()
     }
 
     fun cycleRepeatMode() {
@@ -291,6 +307,7 @@ class MusicPlayer(
             RepeatMode.ALL -> RepeatMode.ONE
             RepeatMode.ONE -> RepeatMode.OFF
         }
+        preloadNextTrack()
     }
 
     private fun rebuildPlayOrder(anchorIndex: Int) {
@@ -410,6 +427,46 @@ class MusicPlayer(
         } else {
             playItunesTrack(track)
         }
+        preloadNextTrack()
+    }
+
+    // Figures out which track would play next without changing any state -
+    // mirrors advance()'s own logic (repeat-one/repeat-all/queue order) so the
+    // prediction stays correct with shuffle on. Returns null when the next
+    // step would require asking the autoplay provider, since resolving that
+    // early would trigger its side effects (network calls, quota use) before
+    // the user has actually reached the end of the queue.
+    private fun peekNextTrack(): Track? {
+        val tracks = _queue.value
+        if (tracks.isEmpty() || playOrder.isEmpty()) return null
+        if (_repeatMode.value == RepeatMode.ONE) return _currentTrack.value
+        val nextPos = playOrderPos + 1
+        return when {
+            nextPos in playOrder.indices -> tracks.getOrNull(playOrder[nextPos])
+            _repeatMode.value == RepeatMode.ALL -> tracks.getOrNull(playOrder[0])
+            else -> null
+        }
+    }
+
+    private fun preloadNextTrack() {
+        preloadJob?.cancel()
+        val next = peekNextTrack() ?: return
+        if (next.source != TrackSource.YOUTUBE) return
+        val videoId = next.youtubeVideoId ?: return
+        if (preloadedStreamUrls.containsKey(videoId)) return
+        preloadJob = scope.launch {
+            try {
+                val response = withContext(Dispatchers.IO) {
+                    relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                }
+                preloadedStreamUrls[videoId] = response.stream_url
+            } catch (e: Exception) {
+                // Best-effort prefetch only - if it fails, playYoutubeTrack()
+                // will just resolve it fresh (with its own WebView fallback)
+                // when this track is actually reached, same as before.
+                Log.w("MusicPlayer", "Prefetch resolve failed for $videoId", e)
+            }
+        }
     }
 
     private fun playItunesTrack(track: Track) {
@@ -474,10 +531,19 @@ class MusicPlayer(
         // url resolve karke seedha ExoPlayer se bajao - WebView/IFrame bilkul
         // touch nahi hota. Fail hone par (relay down, timeout, 401/502 etc.)
         // SECONDARY/fallback WebView tareeka use hota hai.
+        // FIX: if preloadNextTrack() already resolved this videoId while the
+        // previous track was playing, use that cached URL immediately instead
+        // of making the caller wait on a fresh (potentially slow) relay call -
+        // this is what actually removes the buffering gap between tracks.
+        val preloadedUrl = preloadedStreamUrls.remove(videoId)
         scope.launch {
             try {
-                val response = withContext(Dispatchers.IO) {
-                    relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                val response = if (preloadedUrl != null) {
+                    RelayResolveResponse(video_id = videoId, stream_url = preloadedUrl)
+                } else {
+                    withContext(Dispatchers.IO) {
+                        relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                    }
                 }
                 if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
                 isRelayAudio = true
@@ -743,6 +809,8 @@ class MusicPlayer(
     fun release() {
         stopProgressTracker()
         cancelBufferingWatchdog()
+        preloadJob?.cancel()
+        preloadedStreamUrls.clear()
         mediaController?.release()
         mediaController = null
         if (PlaybackBridge.onNext != null) PlaybackBridge.onNext = null
