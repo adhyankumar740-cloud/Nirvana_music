@@ -10,6 +10,7 @@ import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.Query
 import java.util.concurrent.TimeUnit
 
@@ -35,25 +36,24 @@ data class RelaySearchResponse(
 )
 
 /**
- * Talks to the Netlify proxy in /netlify-proxy, NOT to the real relay backend
- * or YouTube directly. The app sends no API key of any kind - the proxy's two
- * Netlify Functions (/api/search, /api/resolve) hold the real relay backend
- * URL/key and the YouTube Data API key as server-side environment variables
- * and attach them when forwarding the request. Search falls back to the
- * YouTube Data API server-side (inside the proxy) if the relay call fails;
- * playback falls back to the WebView/IFrame player only if /resolve fails.
+ * Talks directly to your relay backend (Revo-music's app.py) on Render -
+ * PRIMARY source for both search/metadata (/search) and audio (/resolve).
+ * The X-Relay-Key is sent on every call from the app itself, so it IS
+ * embedded in the built APK.
  */
 interface RelayService {
 
     @GET("search")
     suspend fun search(
         @Query("query") query: String,
-        @Query("limit") limit: Int = 20
+        @Query("limit") limit: Int = 20,
+        @Header("X-Relay-Key") relayKey: String?
     ): RelaySearchResponse
 
     @GET("resolve")
     suspend fun resolve(
-        @Query("video_id") videoId: String
+        @Query("video_id") videoId: String,
+        @Header("X-Relay-Key") relayKey: String?
     ): RelayResolveResponse
 
     companion object {
