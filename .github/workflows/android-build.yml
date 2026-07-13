@@ -38,7 +38,7 @@ jobs:
       # Firebase email-link (magic link) login App Links verification ke
       # liye is keystore ka SHA-1/SHA-256 fingerprint Firebase console mein
       # register karna padta hai â€” isliyekeystore HAR build mein same
-      # rehna chahiye (naya keystore = naya fingerprint = link phir se
+      # rehna chahiye (naya kstore = naya fingerprint = link phir se
       # browser mein khulega, app mein nahi).
       #
       # Agar `DEBUG_KEYSTORE_BASE64` repo secret set hai, wahi (fixed)
