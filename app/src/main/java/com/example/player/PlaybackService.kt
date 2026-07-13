@@ -48,14 +48,21 @@ class PlaybackService : MediaSessionService() {
             controller: MediaSession.ControllerInfo,
             playerCommand: Int
         ): Int {
+            // FIX: returning RESULT_ERROR_NOT_SUPPORTED here told Media3 the
+            // command failed, which caused system UI (notification, lock
+            // screen, Bluetooth/Auto) to treat Next/Previous as broken after
+            // a single press - sometimes disabling or hiding them entirely.
+            // RESULT_INFO_SKIPPED means "handled, just not via the default
+            // player behaviour" - it lets us run our own skipNext/skipPrevious
+            // logic while keeping the buttons enabled and responsive.
             when (playerCommand) {
                 Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> {
                     PlaybackBridge.onNext?.invoke()
-                    return SessionResult.RESULT_ERROR_NOT_SUPPORTED
+                    return SessionResult.RESULT_INFO_SKIPPED
                 }
                 Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> {
                     PlaybackBridge.onPrevious?.invoke()
-                    return SessionResult.RESULT_ERROR_NOT_SUPPORTED
+                    return SessionResult.RESULT_INFO_SKIPPED
                 }
             }
             return super.onPlayerCommandRequest(session, controller, playerCommand)
@@ -141,6 +148,14 @@ class PlaybackService : MediaSessionService() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpDataSourceFactory))
             .setAudioAttributes(audioAttributes, false) // silent track hai, isko audio focus fight karne ki zaroorat nahi
             .setHandleAudioBecomingNoisy(true)
+            // FIX: background playback (screen off) needs a real audio stream
+            // to keep buffering over the network without the CPU going to
+            // sleep mid-download. WAKE_LOCK was already declared in the
+            // manifest but never actually used - WAKE_MODE_NETWORK holds a
+            // partial wake lock + wifi lock while playing, which is what
+            // actually keeps relay-resolved audio streaming smoothly once the
+            // screen turns off.
+            .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
 
         mediaSession = MediaSession.Builder(this, NotificationFacadePlayer(player))
