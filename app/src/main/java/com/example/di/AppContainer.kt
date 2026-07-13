@@ -26,11 +26,8 @@ class AppContainer(private val context: Context) {
         LrcLibService.create()
     }
 
-    // RELAY_BASE_URL is the ONLY network config the app carries - it points at
-    // the Netlify proxy (see /netlify-proxy), never directly at YouTube or the
-    // real relay backend. No API key of any kind is embedded in the app;
-    // the proxy's Netlify Functions add the real YouTube/relay keys
-    // server-side from their own environment variables.
+    // Talks directly to the relay backend - no proxy in between. The relay's
+    // own key IS embedded in the app/APK (BuildConfig.RELAY_API_KEY).
     val relayService: RelayService by lazy {
         RelayService.create(BuildConfig.RELAY_BASE_URL)
     }
@@ -39,6 +36,7 @@ class AppContainer(private val context: Context) {
         MusicRepository(
             apiService = apiService,
             relayService = relayService,
+            relayApiKey = BuildConfig.RELAY_API_KEY,
             lrcLibService = lrcLibService,
             savedTrackDao = database.savedTrackDao(),
             searchHistoryDao = database.searchHistoryDao(),
@@ -58,7 +56,7 @@ class AppContainer(private val context: Context) {
     }
 
     val musicPlayer: MusicPlayer by lazy {
-        MusicPlayer(context, relayService)
+        MusicPlayer(context, relayService, BuildConfig.RELAY_API_KEY)
     }
 
     val samplesPlayerManager: SamplesPlayerManager by lazy {
