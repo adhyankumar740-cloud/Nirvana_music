@@ -18,10 +18,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -30,28 +34,35 @@ import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
+import com.example.announcement.Announcement
 import com.example.di.AppContainer
 import com.example.player.YouTubePlayerHost
+import com.example.ui.screens.AnnouncementDialog
 import com.example.ui.screens.AuthScreen
+import com.example.ui.screens.BottomPlayerTray
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.JamScreen
 import com.example.ui.screens.LibraryScreen
+import com.example.ui.screens.NowPlayingScreen
+import com.example.ui.screens.OnboardingScreen
 import com.example.ui.screens.SamplesScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.viewmodel.AuthViewModel
 import com.example.ui.viewmodel.JamViewModel
 import com.example.ui.viewmodel.MusicViewModel
+import com.example.ui.viewmodel.OnboardingViewModel
 import com.example.ui.viewmodel.PlaylistViewModel
 import com.example.ui.viewmodel.SamplesViewModel
 
@@ -63,6 +74,10 @@ class MainActivity : ComponentActivity() {
     // Setup all ViewModels cleanly with factories
     private val authViewModel: AuthViewModel by viewModels {
         AuthViewModel.Factory(applicationContext)
+    }
+
+    private val onboardingViewModel: OnboardingViewModel by viewModels {
+        OnboardingViewModel.Factory(applicationContext)
     }
 
     private val musicViewModel: MusicViewModel by viewModels {
@@ -101,16 +116,20 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme {
                 val isLoggedIn by authViewModel.isLoggedIn.collectAsState()
-                
-                if (!isLoggedIn) {
-                    AuthScreen(authViewModel = authViewModel)
-                } else {
-                    MainAppLayout(
+                val isOnboardingComplete by onboardingViewModel.isComplete.collectAsState()
+
+                when {
+                    !isLoggedIn -> AuthScreen(authViewModel = authViewModel)
+                    // Shown exactly once, right after the very first login on this
+                    // device (OnboardingPreferences persists completion locally).
+                    !isOnboardingComplete -> OnboardingScreen(onboardingViewModel = onboardingViewModel)
+                    else -> MainAppLayout(
                         musicViewModel = musicViewModel,
                         authViewModel = authViewModel,
                         samplesViewModel = samplesViewModel,
                         jamViewModel = jamViewModel,
-                        playlistViewModel = playlistViewModel
+                        playlistViewModel = playlistViewModel,
+                        appContainer = appContainer
                     )
                 }
             }
@@ -132,13 +151,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppLayout(
     musicViewModel: MusicViewModel,
     authViewModel: AuthViewModel,
     samplesViewModel: SamplesViewModel,
     jamViewModel: JamViewModel,
-    playlistViewModel: PlaylistViewModel
+    playlistViewModel: PlaylistViewModel,
+    appContainer: AppContainer
 ) {
     val selectedTab by musicViewModel.selectedTab.collectAsState()
 
@@ -146,8 +167,7 @@ fun MainAppLayout(
     // (see SamplesViewModel.playFullSong) but never left the Samples tab, so the
     // song audibly started while the screen stayed on the sample feed - it looked
     // like tapping the button did nothing. Once a full song actually starts
-    // playing while the user is still on "samples", jump them to Home, where the
-    // BottomPlayerTray / NowPlayingScreen live.
+    // playing while the user is still on "samples", jump them to Home.
     val fullSongCurrentTrack by musicViewModel.player.currentTrack.collectAsState()
     val isResolvingFullSong by samplesViewModel.isResolvingFullSong.collectAsState()
     LaunchedEffect(fullSongCurrentTrack, isResolvingFullSong) {
@@ -168,6 +188,24 @@ fun MainAppLayout(
         snackbarHostState.showSnackbar(message)
         musicViewModel.player.clearPlaybackError()
     }
+
+    // Admin Panel announcement/update popup (see public/admin/index.html),
+    // checked once per app launch and shown at most once per day.
+    var announcementToShow by remember { mutableStateOf<Announcement?>(null) }
+    LaunchedEffect(Unit) {
+        announcementToShow = appContainer.announcementManager.getAnnouncementToShow()
+    }
+
+    // Persistent mini player state - lives here (not inside any one tab
+    // screen) so it stays visible and pinned to the bottom across Home,
+    // Samples, Jam, and Library, replacing the space the YouTube WebView
+    // used to occupy.
+    val currentTrack by musicViewModel.player.currentTrack.collectAsState()
+    val isPlaying by musicViewModel.player.isPlaying.collectAsState()
+    val playbackPos by musicViewModel.player.playbackPosition.collectAsState()
+    val duration by musicViewModel.player.duration.collectAsState()
+    val isBuffering by musicViewModel.player.isBuffering.collectAsState()
+    var showPlayerDetail by remember { mutableStateOf(false) }
 
     Scaffold(
         snackbarHost = {
@@ -261,19 +299,31 @@ fun MainAppLayout(
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
         ) {
-            when (selectedTab) {
-                "home" -> HomeScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
-                "samples" -> SamplesScreen(samplesViewModel = samplesViewModel)
-                "jam" -> JamScreen(jamViewModel = jamViewModel, authViewModel = authViewModel)
-                "library" -> LibraryScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
+            // Screen content - reserves space at the bottom for the mini
+            // player (below) whenever something is loaded/playing, so list
+            // content never sits hidden behind the tray.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = if (currentTrack != null) 72.dp else 0.dp)
+            ) {
+                when (selectedTab) {
+                    "home" -> HomeScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
+                    "samples" -> SamplesScreen(samplesViewModel = samplesViewModel)
+                    "jam" -> JamScreen(jamViewModel = jamViewModel, authViewModel = authViewModel)
+                    "library" -> LibraryScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
+                }
             }
 
-            // NOTE: originally kept visibly small here whenever a YouTube full-song
+            // NOTE: originally kept visibly large here whenever a YouTube full-song
             // was playing, because YouTube's Terms of Service require the official
             // IFrame player to stay visible (it can't be hidden/disguised) when used
-            // this way. Hidden below at the user's explicit request, with that ToS
-            // risk understood - YouTube could revoke API access for this app if this
-            // is flagged, which would break YouTube-sourced playback entirely.
+            // this way. Shrunk to a practically-invisible 1dp box at the user's
+            // explicit request, with that ToS risk understood - YouTube could revoke
+            // API access for this app if this is flagged, which would break
+            // YouTube-sourced playback entirely. The screen space it used to occupy
+            // is now filled by the persistent mini player below instead of sitting
+            // empty.
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -281,6 +331,81 @@ fun MainAppLayout(
                     .size(1.dp)
             ) {
                 YouTubePlayerHost(musicPlayer = musicViewModel.player, modifier = Modifier.fillMaxSize())
+            }
+
+            // Persistent mini player - pinned to the bottom of the screen,
+            // above the bottom nav bar, visible from every tab. This is what
+            // now fills the space that used to be an empty black bar left by
+            // the (now hidden) YouTube WebView.
+            if (currentTrack != null) {
+                BottomPlayerTray(
+                    track = currentTrack!!,
+                    isPlaying = isPlaying,
+                    isBuffering = isBuffering,
+                    onPlayPauseClick = {
+                        if (isPlaying) musicViewModel.player.pause() else musicViewModel.player.resume()
+                    },
+                    onNextClick = { musicViewModel.player.skipNext() },
+                    onCloseClick = { musicViewModel.player.stopAndDismiss() },
+                    onTrayClick = { showPlayerDetail = true },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
+            }
+
+            // Fullscreen Player Detail Bottom Sheet
+            if (showPlayerDetail && currentTrack != null) {
+                val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                ModalBottomSheet(
+                    onDismissRequest = { showPlayerDetail = false },
+                    sheetState = sheetState,
+                    containerColor = MaterialTheme.colorScheme.background,
+                    dragHandle = {
+                        IconButton(onClick = { showPlayerDetail = false }) {
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Close player detail",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                ) {
+                    NowPlayingScreen(
+                        track = currentTrack!!,
+                        isPlaying = isPlaying,
+                        isBuffering = isBuffering,
+                        isResolvingAutoplay = musicViewModel.player.isResolvingAutoplay.collectAsState().value,
+                        playbackPos = playbackPos,
+                        duration = duration,
+                        queue = musicViewModel.player.queue.collectAsState().value,
+                        queueIndex = musicViewModel.player.queueIndex.collectAsState().value,
+                        isShuffleEnabled = musicViewModel.player.isShuffleEnabled.collectAsState().value,
+                        repeatMode = musicViewModel.player.repeatMode.collectAsState().value,
+                        lyrics = musicViewModel.lyrics.collectAsState().value,
+                        isLoadingLyrics = musicViewModel.isLoadingLyrics.collectAsState().value,
+                        onPlayPauseClick = {
+                            if (isPlaying) musicViewModel.player.pause() else musicViewModel.player.resume()
+                        },
+                        onPrevClick = { musicViewModel.player.skipPrevious() },
+                        onNextClick = { musicViewModel.player.skipNext() },
+                        onSeek = { musicViewModel.player.seekTo(it) },
+                        onFavoriteClick = { musicViewModel.toggleFavorite(currentTrack!!) },
+                        onShuffleClick = { musicViewModel.player.toggleShuffle() },
+                        onRepeatClick = { musicViewModel.player.cycleRepeatMode() },
+                        onQueueItemClick = { musicViewModel.player.playQueueItem(it) },
+                        onQueueItemRemove = { musicViewModel.player.removeFromQueue(it) }
+                    )
+                }
+            }
+
+            // Admin Panel announcement popup - shown at most once per day.
+            announcementToShow?.let { announcement ->
+                AnnouncementDialog(
+                    announcement = announcement,
+                    onDismiss = {
+                        appContainer.announcementManager.markShown(announcement)
+                        announcementToShow = null
+                    }
+                )
             }
         }
     }
