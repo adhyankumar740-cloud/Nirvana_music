@@ -80,7 +80,13 @@ class MusicRepository(
     private val savedTrackDao: SavedTrackDao,
     private val searchHistoryDao: SearchHistoryDao,
     private val playHistoryDao: PlayHistoryDao,
-    private val playlistDao: PlaylistDao
+    private val playlistDao: PlaylistDao,
+    // Genres/artists picked during first-launch onboarding (see
+    // OnboardingScreen/OnboardingPreferences). Read once at container
+    // creation time - onboarding only ever runs once, before this
+    // repository is typically first used.
+    private val onboardingGenres: List<String> = emptyList(),
+    private val onboardingArtists: List<String> = emptyList()
 ) {
     // Cache for Samples feed to ensure instant load times
     private val samplesCache = mutableListOf<Track>()
@@ -105,9 +111,17 @@ class MusicRepository(
      * GROUP BY queries over a capped window of recent rows.
      */
     private suspend fun getPersonalizationProfile(): PersonalizationProfile = withContext(Dispatchers.IO) {
-        val genres = playHistoryDao.getTopGenres(3).map { it.value }
-        val artists = playHistoryDao.getTopArtists(3).map { it.value }
+        val historyGenres = playHistoryDao.getTopGenres(3).map { it.value }
+        val historyArtists = playHistoryDao.getTopArtists(3).map { it.value }
         val queries = searchHistoryDao.getTopQueries(3).map { it.value }
+
+        // Blend the user's onboarding picks in behind their real listening
+        // history (deduped, history wins ties) so actual behaviour always
+        // takes priority once it exists, but a brand-new user with zero
+        // history still gets personalized results from their declared taste
+        // instead of falling back to the generic "chill lofi" default.
+        val genres = (historyGenres + onboardingGenres).distinct().take(5)
+        val artists = (historyArtists + onboardingArtists).distinct().take(5)
         PersonalizationProfile(genres, artists, queries)
     }
 
