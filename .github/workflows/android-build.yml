@@ -38,7 +38,7 @@ jobs:
       # Firebase email-link (magic link) login App Links verification ke
       # liye is keystore ka SHA-1/SHA-256 fingerprint Firebase console mein
       # register karna padta hai â€” isliyekeystore HAR build mein same
-      # rehna chahiye (naya kstore = naya fingerprint = link phir se
+      # rehna chahiye (naya keystore = naya fingerprint = link phir se
       # browser mein khulega, app mein nahi).
       #
       # Agar `DEBUG_KEYSTORE_BASE64` repo secret set hai, wahi (fixed)
@@ -89,20 +89,17 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
-      # GEMINI_API_KEY: agar GitHub repo secret set hai to .env bana denge.
-      # RELAY_BASE_URL: sirf apne Netlify proxy site ka URL hai (e.g.
-      # https://your-proxy-site.netlify.app/api/) - koi secret/key nahi hai,
-      # isliye repo secret na ho to bhi .env.example ka placeholder theek hai
-      # (par aap apna real proxy URL yahan bhi secret ke roop me daal sakte ho).
-      # NOTE: YOUTUBE_API_KEY aur RELAY_API_KEY ab is workflow me nahi likhe
-      # jaate - woh keys ab kabhi bhi app/APK me embed nahi hoti. Woh sirf
-      # Netlify proxy (/netlify-proxy) ke environment variables me rehti hain,
-      # server-side, jahan se app ka koi access nahi hai. Agar warna nahi
-      # milega to build fail nahi hogi.
+      # GEMINI_API_KEY / RELAY_BASE_URL / RELAY_API_KEY: agar GitHub repo
+      # secrets set hain to .env bana denge, warna Secrets Gradle Plugin apne
+      # aap .env.example (placeholder) use kar lega, build fail nahi hogi.
+      # NOTE: app ab seedha relay backend (Render) se baat karta hai, koi
+      # Netlify proxy beech me nahi hai - isliye RELAY_API_KEY yahan se
+      # app/APK ke andar embed ho jaati hai.
       - name: Write .env from repository secrets (optional)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           RELAY_BASE_URL: ${{ secrets.RELAY_BASE_URL }}
+          RELAY_API_KEY: ${{ secrets.RELAY_API_KEY }}
         run: |
           rm -f .env
           if [ -n "$GEMINI_API_KEY" ]; then
@@ -110,6 +107,9 @@ jobs:
           fi
           if [ -n "$RELAY_BASE_URL" ]; then
             echo "RELAY_BASE_URL=$RELAY_BASE_URL" >> .env
+          fi
+          if [ -n "$RELAY_API_KEY" ]; then
+            echo "RELAY_API_KEY=$RELAY_API_KEY" >> .env
           fi
           if [ -f .env ]; then
             echo "Wrote .env from repository secrets."
