@@ -1,700 +1,396 @@
-package com.example.player
+package com.example.jam
 
-import android.content.ComponentName
-import android.content.Context
-import android.util.Log
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
-import androidx.media3.common.Player
-import androidx.media3.session.MediaController
-import androidx.media3.session.SessionToken
 import com.example.data.model.Song
-import com.example.data.model.Track
-import com.example.data.model.TrackSongBridge
-import com.example.data.model.TrackSource
-import com.example.data.network.RelayService
-import com.google.common.util.concurrent.MoreExecutors
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ServerValue
+import com.google.firebase.database.ValueEventListener
+import kotlinx.coroutines.tasks.await
 
-enum class RepeatMode { OFF, ONE, ALL }
+/**
+ * Real cross-device group listening ("Jam"), backed by Firebase Realtime Database
+ * (free Spark plan is enough for this — a Jam room is a tiny amount of data).
+ *
+ * How it works:
+ *  - One person creates a room -> gets a short room code (e.g. "NIR482")
+ *  - Anyone else enters that code to join the SAME Firebase node
+ *  - Whenever either person changes the song / play-pause / seeks, that action is
+ *    written to Firebase. Firebase pushes the update to every other connected
+ *    device in real time, and their local player mirrors it.
+ *  - `isApplyingRemoteUpdate` prevents an infinite loop: when we apply a change
+ *    that came from Firebase, we don't immediately re-broadcast it back.
+ *
+ * SYNC-LATENCY FIX: all playback-relevant fields (song + isPlaying + positionMs +
+ * updatedAt) now live together under one `playback` child node and are written with a
+ * SINGLE atomic `updateChildren` call instead of 2-3 separate sequential `setValue()`
+ * calls. Previously each push (e.g. play/pause) did 3 separate network round-trips,
+ * and the other device's listener re-fired once per round-trip with a
+ * partially-updated snapshot (isPlaying flipped but positionMs still stale, etc.) -
+ * that's what produced the 1-2 second, multi-step "catch up" delay. A single write
+ * means a single round-trip and a single, fully-consistent callback on other devices.
+ * The listener is also now scoped to just `playback` (not the whole room), so
+ * unrelated participant join/leave churn no longer triggers extra processing on the
+ * playback-sync path. `updatedAt` uses Firebase's server clock (ServerValue.TIMESTAMP)
+ * instead of the writer's device clock, so the "how much time has passed since this
+ * update was written" compensation isn't thrown off by clock skew between devices.
+ */
+class JamManager {
 
-interface YouTubePlayerBridge {
-    fun loadVideo(videoId: String)
-    fun play()
-    fun pause()
-    fun seekTo(seconds: Float)
-}
+    data class JamParticipant(
+        val uid: String,
+        val name: String,
+        val avatar: String,
+        val isHost: Boolean
+    )
 
-class MusicPlayer(
-    private val context: Context,
-    private val relayService: RelayService,
-    private val relayApiKey: String
-) {
+    data class JamSongState(
+        val songId: String = "",
+        val title: String = "",
+        val artist: String = "",
+        val durationMs: Long = 0,
+        val source: String = "",
+        val streamUrl: String = "",
+        val genre: String = "",
+        val artwork: String = ""
+    ) {
+        fun toSong(): Song = Song(
+            id = songId,
+            title = title,
+            artist = artist,
+            duration = durationMs,
+            source = source,
+            streamUrl = streamUrl,
+            genre = genre,
+            artwork = artwork
+        )
 
-    private var mediaController: MediaController? = null
-    private val pendingActions = mutableListOf<() -> Unit>()
+        /** Flattened fields for a Firebase `updateChildren` call, relative to whatever
+         *  reference is used to perform the update (e.g. `.child("playback")`). */
+        fun toFieldMap(): Map<String, Any?> = mapOf(
+            "songId" to songId,
+            "title" to title,
+            "artist" to artist,
+            "durationMs" to durationMs,
+            "source" to source,
+            "streamUrl" to streamUrl,
+            "genre" to genre,
+            "artwork" to artwork
+        )
 
-    var onLocalSongChange: ((Track) -> Unit)? = null
-    var onLocalPlayPause: ((isPlaying: Boolean, positionMs: Long) -> Unit)? = null
-    var onLocalSeek: ((positionMs: Long) -> Unit)? = null
-
-    private var isApplyingRemote = false
-    private var suppressNextPlayPauseBroadcast = false
-
-    var youtubeBridge: YouTubePlayerBridge? = null
-
-    var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null
-
-    private val _currentTrack = MutableStateFlow<Track?>(null)
-    val currentTrack: StateFlow<Track?> = _currentTrack.asStateFlow()
-
-    private val _isPlaying = MutableStateFlow(false)
-    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
-
-    private val _playbackPosition = MutableStateFlow(0L)
-    val playbackPosition: StateFlow<Long> = _playbackPosition.asStateFlow()
-
-    private val _duration = MutableStateFlow(0L)
-    val duration: StateFlow<Long> = _duration.asStateFlow()
-
-    private val _isBuffering = MutableStateFlow(false)
-    val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow()
-
-    private val _queue = MutableStateFlow<List<Track>>(emptyList())
-    val queue: StateFlow<List<Track>> = _queue.asStateFlow()
-
-    private val _queueIndex = MutableStateFlow(-1)
-    val queueIndex: StateFlow<Int> = _queueIndex.asStateFlow()
-
-    private val _isShuffleEnabled = MutableStateFlow(false)
-    val isShuffleEnabled: StateFlow<Boolean> = _isShuffleEnabled.asStateFlow()
-
-    private val _repeatMode = MutableStateFlow(RepeatMode.OFF)
-    val repeatMode: StateFlow<RepeatMode> = _repeatMode.asStateFlow()
-
-    private val _isResolvingAutoplay = MutableStateFlow(false)
-    val isResolvingAutoplay: StateFlow<Boolean> = _isResolvingAutoplay.asStateFlow()
-
-    private val _playbackError = MutableStateFlow<String?>(null)
-    val playbackError: StateFlow<String?> = _playbackError.asStateFlow()
-
-    private var hasReachedPlayingState = false
-    private var consecutivePlaybackFailures = 0
-    private val maxConsecutivePlaybackFailures = 3
-
-    private var playOrder: List<Int> = emptyList()
-    private var playOrderPos = 0
-
-    private val recentlyPlayedIds = ArrayDeque<Long>()
-    private val recentlyPlayedTracks = ArrayDeque<Track>()
-    private val recentlyPlayedCap = 40
-
-    private var loadedYoutubeVideoId: String? = null
-
-    // True jab current YOUTUBE-source track BrokenX relay se resolve hui real
-    // audio URL se ExoPlayer ke through baj raha hai (PRIMARY). False = purana
-    // WebView/IFrame fallback (SECONDARY) use ho raha hai.
-    private var isRelayAudio = false
-
-    private var bufferingWatchdogJob: Job? = null
-    private val bufferingTimeoutMs = 12_000L
-
-    private var progressJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.Main + Job())
-
-    init {
-        PlaybackBridge.onNext = { skipNext() }
-        PlaybackBridge.onPrevious = { skipPrevious() }
-
-        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
-        controllerFuture.addListener({
-            try {
-                mediaController = controllerFuture.get()
-                mediaController?.addListener(playerListener)
-                pendingActions.forEach { it() }
-                pendingActions.clear()
-            } catch (e: Exception) {
-                Log.e("MusicPlayer", "Failed to connect MediaController", e)
-            }
-        }, MoreExecutors.directExecutor())
+        companion object {
+            fun fromSong(song: Song) = JamSongState(
+                songId = song.id,
+                title = song.title,
+                artist = song.artist,
+                durationMs = song.duration,
+                source = song.source,
+                streamUrl = song.streamUrl,
+                genre = song.genre,
+                artwork = song.artwork
+            )
+        }
     }
 
-    private fun runOnController(action: (MediaController) -> Unit) {
-        val controller = mediaController
-        if (controller != null) action(controller) else pendingActions.add { mediaController?.let(action) }
+    private val auth = FirebaseAuth.getInstance()
+    private val db = FirebaseDatabase.getInstance().reference
+
+    var roomCode: String? = null
+        private set
+    var isHost: Boolean = false
+        private set
+
+    // Set to true only while we are applying a change that came FROM Firebase,
+    // so the callers know not to re-push it (avoids an update loop).
+    var isApplyingRemoteUpdate: Boolean = false
+        private set
+
+    // Split into two tightly-scoped listeners instead of one listener on the whole
+    // room: playback state changes (song/play-pause/seek) are what need to feel
+    // instant, and they shouldn't be delayed or diluted by unrelated roster churn.
+    private var playbackListener: ValueEventListener? = null
+    private var participantsListener: ValueEventListener? = null
+    // BUG FIX (v2): pehle wala "pending flag" tareeka timing pe depend karta tha - agar
+    // song-push ke turant baad hi play-push chala jaye (jo Jam me hamesha hota hai),
+    // to doosra push pehle wale ka pending flag overwrite kar deta, aur jab pehle
+    // wale ka apna hi echo Firebase se wapas aata, use "remote" samajh liya jata aur
+    // galti se pause() call ho jata - isi se gaana "chalu-band-chalu-band" karta tha.
+    // Fix: har write ke saath apna device ka uid (senderUid) bhejo. Listener me agar
+    // senderUid == apna hi uid hai, to yeh guaranteed apna khud ka echo hai (chahe
+    // kitne bhi writes ek saath in-flight ho), state trackers update karo lekin
+    // onRemote* callback kabhi mat fire karo. Sirf doosre device (alag uid) ke
+    // updates par hi local player ko control karo.
+    private var myUid: String? = null
+
+    // Callbacks the ViewModel wires up to actually control local playback / UI
+    var onRemoteSongChange: ((Song) -> Unit)? = null
+    var onRemotePlayPause: ((isPlaying: Boolean, positionMs: Long) -> Unit)? = null
+    var onRemoteSeek: ((positionMs: Long) -> Unit)? = null
+    var onParticipantsChanged: ((List<JamParticipant>) -> Unit)? = null
+    var onLog: ((String) -> Unit)? = null
+
+    private suspend fun ensureSignedIn(): String {
+        myUid?.let { return it }
+        val user = auth.currentUser ?: auth.signInAnonymously().await().user
+        val uid = user?.uid ?: throw IllegalStateException("Firebase anonymous sign-in failed")
+        myUid = uid
+        return uid
     }
 
-    private val playerListener = object : Player.Listener {
-        override fun onIsPlayingChanged(isPlayingNow: Boolean) {
-            _isPlaying.value = isPlayingNow
-            if (isPlayingNow) startProgressTracker() else stopProgressTracker()
+    /** Creates a brand-new Jam room and returns the shareable room code. */
+    suspend fun createRoom(
+        displayName: String,
+        avatar: String,
+        currentSong: Song?,
+        isPlaying: Boolean = false,
+        positionMs: Long = 0L
+    ): String {
+        val uid = ensureSignedIn()
+        var code = generateRoomCode()
+        // Extremely unlikely, but make sure we don't collide with an existing live room.
+        var attempts = 0
+        while (db.child("jams").child(code).get().await().exists() && attempts < 5) {
+            code = generateRoomCode()
+            attempts++
+        }
+        roomCode = code
+        isHost = true
 
-            if (_currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-                if (isPlayingNow) youtubeBridge?.play() else youtubeBridge?.pause()
-            }
+        val roomRef = db.child("jams").child(code)
 
-            if (suppressNextPlayPauseBroadcast) {
-                suppressNextPlayPauseBroadcast = false
-            } else {
-                onLocalPlayPause?.invoke(isPlayingNow, _playbackPosition.value)
+        // One atomic multi-path write for the whole initial room state (host id,
+        // playback state, and our own participant entry) instead of several
+        // sequential ones.
+        val updates = mutableMapOf<String, Any?>(
+            "hostId" to uid,
+            "playback/isPlaying" to isPlaying,
+            "playback/positionMs" to positionMs,
+            "playback/updatedAt" to ServerValue.TIMESTAMP,
+            "playback/senderUid" to uid,
+            "participants/$uid" to mapOf("name" to displayName, "avatar" to avatar, "isHost" to true)
+        )
+        currentSong?.let { song ->
+            JamSongState.fromSong(song).toFieldMap().forEach { (key, value) ->
+                updates["playback/$key"] = value
             }
         }
+        roomRef.updateChildren(updates).await()
+        roomRef.child("participants").child(uid).onDisconnect().removeValue()
 
-        override fun onPlaybackStateChanged(state: Int) {
-            // ExoPlayer state seedha reflect hoti hai jab track ITUNES ho ya
-            // relay-resolved audio bajj raha ho - dono me ExoPlayer hi asli
-            // source hai. WebView fallback ke case me state bridge callbacks
-            // (onYoutubePlayerStateChanged) se aati hai, isliye yahan skip.
-            val exoDrivesStateNatively = _currentTrack.value?.source == TrackSource.ITUNES || isRelayAudio
-            if (!exoDrivesStateNatively) return
-            when (state) {
-                Player.STATE_BUFFERING -> _isBuffering.value = true
-                Player.STATE_READY -> {
-                    _isBuffering.value = false
-                    _duration.value = (mediaController?.duration ?: 0L).coerceAtLeast(0L)
+        // Seed the listener with what we just wrote ourselves, so the very first snapshot
+        // Firebase echoes back (ValueEventListener always fires immediately with the
+        // current data on attach) isn't mistaken for a "remote" change. Without this, the
+        // host's own currently-playing song would immediately restart from 0:00 the moment
+        // they tapped "Create Jam Session".
+        attachListener(code, initialSongId = currentSong?.id, initialIsPlaying = isPlaying)
+        onLog?.invoke("Jam room created! Share code $code with your friend.")
+        return code
+    }
+
+    /** Joins an existing Jam room by code. Returns true if the room exists. */
+    suspend fun joinRoom(code: String, displayName: String, avatar: String): Boolean {
+        val uid = ensureSignedIn()
+        val normalizedCode = code.trim().uppercase()
+        val roomRef = db.child("jams").child(normalizedCode)
+        val snapshot = roomRef.get().await()
+        if (!snapshot.exists()) {
+            return false
+        }
+
+        roomCode = normalizedCode
+        isHost = false
+
+        val myRef = roomRef.child("participants").child(uid)
+        myRef.setValue(mapOf("name" to displayName, "avatar" to avatar, "isHost" to false)).await()
+        myRef.onDisconnect().removeValue()
+
+        attachListener(normalizedCode)
+        onLog?.invoke("Joined Jam room $normalizedCode!")
+        return true
+    }
+
+    fun leaveRoom() {
+        val code = roomCode ?: return
+        val uid = myUid
+        val roomRef = db.child("jams").child(code)
+        playbackListener?.let { roomRef.child("playback").removeEventListener(it) }
+        participantsListener?.let { roomRef.child("participants").removeEventListener(it) }
+        if (uid != null) {
+            roomRef.child("participants").child(uid).removeValue()
+        }
+        playbackListener = null
+        participantsListener = null
+        roomCode = null
+        isHost = false
+    }
+
+    /** Call when the local user changes the song (only pushes if this device caused it).
+     *  Single atomic write across all song fields + reset position, in one round-trip. */
+    fun pushSongChange(song: Song) {
+        val code = roomCode ?: return
+        if (isApplyingRemoteUpdate) return
+        val playbackRef = db.child("jams").child(code).child("playback")
+        val updates = mutableMapOf<String, Any?>(
+            "positionMs" to 0L,
+            "updatedAt" to ServerValue.TIMESTAMP,
+            "senderUid" to myUid
+        )
+        updates.putAll(JamSongState.fromSong(song).toFieldMap())
+        playbackRef.updateChildren(updates)
+    }
+
+    /** Call when the local user plays/pauses. Single atomic write, one round-trip. */
+    fun pushPlayPause(isPlaying: Boolean, positionMs: Long) {
+        val code = roomCode ?: return
+        if (isApplyingRemoteUpdate) return
+        val playbackRef = db.child("jams").child(code).child("playback")
+        playbackRef.updateChildren(
+            mapOf(
+                "isPlaying" to isPlaying,
+                "positionMs" to positionMs,
+                "updatedAt" to ServerValue.TIMESTAMP,
+                "senderUid" to myUid
+            )
+        )
+    }
+
+    /** Call when the local user seeks/scrubs. Single atomic write, one round-trip. */
+    fun pushSeek(positionMs: Long) {
+        val code = roomCode ?: return
+        if (isApplyingRemoteUpdate) return
+        val playbackRef = db.child("jams").child(code).child("playback")
+        playbackRef.updateChildren(
+            mapOf(
+                "positionMs" to positionMs,
+                "updatedAt" to ServerValue.TIMESTAMP,
+                "senderUid" to myUid
+            )
+        )
+    }
+
+    private suspend fun attachListener(
+        code: String,
+        initialSongId: String? = null,
+        initialIsPlaying: Boolean? = null
+    ) {
+        val roomRef = db.child("jams").child(code)
+        playbackListener?.let { roomRef.child("playback").removeEventListener(it) }
+        participantsListener?.let { roomRef.child("participants").removeEventListener(it) }
+
+        // hostId is fixed at room creation and never changes, so a one-time read is
+        // enough - no need for a live listener on it, keeping the roster listener
+        // lightweight.
+        val hostId = try {
+            roomRef.child("hostId").get().await().getValue(String::class.java)
+        } catch (e: Exception) {
+            null
+        }
+
+        val pListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val participants = snapshot.children.mapNotNull { child ->
+                    val name = child.child("name").getValue(String::class.java) ?: return@mapNotNull null
+                    val avatar = child.child("avatar").getValue(String::class.java) ?: "🎧"
+                    JamParticipant(
+                        uid = child.key ?: "",
+                        name = name,
+                        avatar = avatar,
+                        isHost = child.key == hostId
+                    )
                 }
-                Player.STATE_ENDED -> handleTrackEnded()
-                else -> {}
+                onParticipantsChanged?.invoke(participants)
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                onLog?.invoke("Jam sync error: ${error.message}")
             }
         }
+        participantsListener = pListener
+        roomRef.child("participants").addValueEventListener(pListener)
 
-        override fun onPositionDiscontinuity(
-            oldPosition: Player.PositionInfo,
-            newPosition: Player.PositionInfo,
-            reason: Int
-        ) {
-            if (reason == Player.DISCONTINUITY_REASON_SEEK && _currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-                val targetSeekMs = newPosition.positionMs
-                _playbackPosition.value = targetSeekMs
-                youtubeBridge?.seekTo(targetSeekMs / 1000f)
-                if (!isApplyingRemote) onLocalSeek?.invoke(targetSeekMs)
-            }
-        }
+        // Seeded with whatever we already know locally (e.g. the host's own song/state
+        // that was just written to Firebase) so the guaranteed initial callback from
+        // addValueEventListener doesn't get misread as an incoming remote change.
+        val plListener = object : ValueEventListener {
+            private var lastSongId: String? = initialSongId
+            private var lastIsPlaying: Boolean? = initialIsPlaying
 
-        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-            val track = _currentTrack.value ?: return
-            if (isRelayAudio && track.source == TrackSource.YOUTUBE) {
-                // Relay se resolve hui audio chalte-chalte fail hui (expired
-                // url, network drop, 401 etc.) - WebView fallback pe switch
-                // karo taaki gaana ruke na.
-                Log.e("MusicPlayer", "Relay audio playback error, falling back to YouTube WebView", error)
-                playYoutubeViaWebViewFallback(track)
-            } else if (track.source == TrackSource.ITUNES) {
-                registerPlaybackFailureAndMaybeStop()
-            }
-        }
-    }
+            override fun onDataChange(snapshot: DataSnapshot) {
+                if (!snapshot.exists()) return
+                isApplyingRemoteUpdate = true
+                try {
+                    val senderUid = snapshot.child("senderUid").getValue(String::class.java)
+                    val isEcho = senderUid != null && senderUid == myUid
 
-    fun setQueue(tracks: List<Track>, startIndex: Int = 0) {
-        if (tracks.isEmpty()) return
-        consecutivePlaybackFailures = 0
-        _playbackError.value = null
-        _queue.value = tracks
-        rebuildPlayOrder(anchorIndex = startIndex.coerceIn(0, tracks.size - 1))
-        _queueIndex.value = playOrder[playOrderPos]
-        play(tracks[playOrder[playOrderPos]])
-    }
-
-    fun addToQueue(track: Track) {
-        _queue.value = _queue.value + track
-        playOrder = playOrder + (_queue.value.size - 1)
-    }
-
-    fun removeFromQueue(index: Int) {
-        if (index !in _queue.value.indices) return
-        val removedTrackWasCurrent = index == _queueIndex.value
-        _queue.value = _queue.value.filterIndexed { i, _ -> i != index }
-        rebuildPlayOrder(anchorIndex = (_queueIndex.value - if (index < _queueIndex.value) 1 else 0).coerceIn(0, (_queue.value.size - 1).coerceAtLeast(0)))
-        if (removedTrackWasCurrent && _queue.value.isNotEmpty()) {
-            _queueIndex.value = playOrder[playOrderPos]
-            play(_queue.value[playOrder[playOrderPos]])
-        }
-    }
-
-    fun playQueueItem(index: Int) {
-        val tracks = _queue.value
-        if (index !in tracks.indices) return
-        consecutivePlaybackFailures = 0
-        _playbackError.value = null
-        playOrderPos = playOrder.indexOf(index).coerceAtLeast(0)
-        _queueIndex.value = index
-        play(tracks[index])
-    }
-
-    fun toggleShuffle() {
-        _isShuffleEnabled.value = !_isShuffleEnabled.value
-        rebuildPlayOrder(anchorIndex = _queueIndex.value.coerceAtLeast(0))
-    }
-
-    fun cycleRepeatMode() {
-        _repeatMode.value = when (_repeatMode.value) {
-            RepeatMode.OFF -> RepeatMode.ALL
-            RepeatMode.ALL -> RepeatMode.ONE
-            RepeatMode.ONE -> RepeatMode.OFF
-        }
-    }
-
-    private fun rebuildPlayOrder(anchorIndex: Int) {
-        val tracks = _queue.value
-        if (tracks.isEmpty()) {
-            playOrder = emptyList()
-            playOrderPos = 0
-            return
-        }
-        val safeAnchor = anchorIndex.coerceIn(0, tracks.size - 1)
-        playOrder = if (_isShuffleEnabled.value) {
-            val rest = tracks.indices.filter { it != safeAnchor }.shuffled()
-            listOf(safeAnchor) + rest
-        } else {
-            tracks.indices.toList()
-        }
-        playOrderPos = playOrder.indexOf(safeAnchor).coerceAtLeast(0)
-    }
-
-    fun skipNext() = advance(1)
-    fun skipPrevious() = advance(-1)
-
-    private fun advance(direction: Int) {
-        val tracks = _queue.value
-        if (tracks.isEmpty()) return
-
-        if (_repeatMode.value == RepeatMode.ONE) {
-            _currentTrack.value?.let { play(it) }
-            return
-        }
-
-        val nextPos = playOrderPos + direction
-        when {
-            nextPos in playOrder.indices -> {
-                playOrderPos = nextPos
-                val idx = playOrder[playOrderPos]
-                _queueIndex.value = idx
-                play(tracks[idx])
-            }
-            direction > 0 && _repeatMode.value == RepeatMode.ALL -> {
-                playOrderPos = 0
-                val idx = playOrder[0]
-                _queueIndex.value = idx
-                play(tracks[idx])
-            }
-            direction > 0 -> triggerAutoplay()
-            else -> {
-                _currentTrack.value?.let { seekTo(0L); if (!_isPlaying.value) resume() }
-            }
-        }
-    }
-
-    private fun triggerAutoplay() {
-        val current = _currentTrack.value ?: return
-        val provider = autoplayProvider ?: return
-        scope.launch {
-            _isResolvingAutoplay.value = true
-            try {
-                val excludeIds = (_queue.value.map { it.id } + recentlyPlayedIds).toSet()
-                val recentTracks = _queue.value + recentlyPlayedTracks
-                val next = provider(current, excludeIds, recentTracks)
-                if (next != null) {
-                    _queue.value = _queue.value + next
-                    val newIndex = _queue.value.size - 1
-                    playOrder = playOrder + newIndex
-                    playOrderPos = playOrder.size - 1
-                    _queueIndex.value = newIndex
-                    play(next)
-                } else {
-                    // Pehle yahan kuch nahi hota tha - button dabane pe koi
-                    // response hi nahi milta tha (na error, na naya gaana),
-                    // isliye "Next" kaam hi nahi karta lagta tha. Ab user ko
-                    // clear pata chalega ki koi similar gaana nahi mila
-                    // (usually YouTube API key/quota issue ya genre match na milna).
-                    _playbackError.value = "Koi agla gaana nahi mila - YouTube API key/quota check karo."
-                }
-            } finally {
-                _isResolvingAutoplay.value = false
-            }
-        }
-    }
-
-    private fun handleTrackEnded() {
-        if (!hasReachedPlayingState) {
-            registerPlaybackFailureAndMaybeStop()
-            return
-        }
-        advance(1)
-    }
-
-    private fun registerPlaybackFailureAndMaybeStop() {
-        consecutivePlaybackFailures++
-        if (consecutivePlaybackFailures >= maxConsecutivePlaybackFailures) {
-            consecutivePlaybackFailures = 0
-            _isBuffering.value = false
-            _isPlaying.value = false
-            _playbackError.value = "Kai gaane play nahi ho paaye, ruk gaya - kuch aur try karein."
-            Log.e("MusicPlayer", "Stopping auto-skip after $maxConsecutivePlaybackFailures playback failures in a row")
-            return
-        }
-        advance(1)
-    }
-
-    private fun trackRecentlyPlayed(track: Track) {
-        if (recentlyPlayedIds.lastOrNull() != track.id) {
-            recentlyPlayedIds.addLast(track.id)
-            recentlyPlayedTracks.addLast(track)
-            while (recentlyPlayedIds.size > recentlyPlayedCap) recentlyPlayedIds.removeFirst()
-            while (recentlyPlayedTracks.size > recentlyPlayedCap) recentlyPlayedTracks.removeFirst()
-        }
-    }
-
-    fun play(track: Track) {
-        trackRecentlyPlayed(track)
-        if (track.source == TrackSource.YOUTUBE) {
-            playYoutubeTrack(track)
-        } else {
-            playItunesTrack(track)
-        }
-    }
-
-    private fun playItunesTrack(track: Track) {
-        isRelayAudio = false
-        cancelBufferingWatchdog()
-        youtubeBridge?.pause()
-        _currentTrack.value = track
-        if (!isApplyingRemote) onLocalSongChange?.invoke(track)
-        _isBuffering.value = true
-        _isPlaying.value = false
-        _playbackPosition.value = 0L
-        
-        runOnController { controller ->
-            val metadata = MediaMetadata.Builder()
-                .setTitle(track.title)
-                .setArtist(track.artist ?: "Unknown Artist")
-                .build()
-
-            val mediaItem = MediaItem.Builder()
-                .setUri(track.previewUrl)
-                .setMediaId(track.id.toString())
-                .setMediaMetadata(metadata)
-                .build()
-
-            controller.repeatMode = Player.REPEAT_MODE_OFF // silent-audio fallback repeat na reh jaye
-            controller.setMediaItem(mediaItem)
-            controller.prepare()
-            controller.play()
-        }
-        startProgressTracker()
-    }
-
-    private fun playYoutubeTrack(track: Track) {
-        isRelayAudio = false
-        cancelBufferingWatchdog()
-        _currentTrack.value = track
-        if (!isApplyingRemote) onLocalSongChange?.invoke(track)
-
-        _isBuffering.value = true
-        _isPlaying.value = false
-        _playbackPosition.value = 0L
-        _duration.value = track.durationMs
-        hasReachedPlayingState = false
-        _playbackError.value = null
-
-        val videoId = track.youtubeVideoId
-        loadedYoutubeVideoId = videoId
-        if (videoId == null) {
-            registerPlaybackFailureAndMaybeStop()
-            return
-        }
-
-        // PRIMARY: BrokenX relay (Revo-music /resolve) se ek real audio stream
-        // url resolve karke seedha ExoPlayer se bajao - WebView/IFrame bilkul
-        // touch nahi hota. Fail hone par (relay down, timeout, 401/502 etc.)
-        // SECONDARY/fallback WebView tareeka use hota hai.
-        scope.launch {
-            try {
-                val response = withContext(Dispatchers.IO) {
-                    relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
-                }
-                if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
-                isRelayAudio = true
-                runOnController { controller ->
-                    val metadata = MediaMetadata.Builder()
-                        .setTitle(track.title)
-                        .setArtist(track.artist ?: "Unknown Artist")
-                        .build()
-
-                    val mediaItem = MediaItem.Builder()
-                        .setUri(response.stream_url)
-                        .setMediaId("relay_${track.id}")
-                        .setMediaMetadata(metadata)
-                        .build()
-
-                    controller.repeatMode = Player.REPEAT_MODE_OFF // silent-audio fallback repeat na reh jaye
-                    controller.setMediaItem(mediaItem)
-                    controller.prepare()
-                    controller.play()
-                }
-                startProgressTracker()
-            } catch (e: Exception) {
-                Log.e("MusicPlayer", "Relay resolve failed for $videoId, falling back to YouTube WebView", e)
-                if (loadedYoutubeVideoId != videoId) return@launch
-                playYoutubeViaWebViewFallback(track)
-            }
-        }
-    }
-
-    // SECONDARY/fallback path - purana silent-audio-trick + WebView IFrame,
-    // ab sirf tab chalta hai jab relay resolve fail ho jaye (ya baad me error de).
-    private fun playYoutubeViaWebViewFallback(track: Track) {
-        isRelayAudio = false
-        val videoId = track.youtubeVideoId
-        if (videoId == null) {
-            registerPlaybackFailureAndMaybeStop()
-            return
-        }
-        loadedYoutubeVideoId = videoId
-        _isBuffering.value = true
-        _isPlaying.value = false
-
-        // --- BACKGROUND SILENT AUDIO TRICK ---
-        runOnController { controller ->
-            val metadata = MediaMetadata.Builder()
-                .setTitle(track.title)
-                .setArtist(track.artist ?: "YouTube Stream")
-                .build()
-
-            val packageName = context.packageName
-            val silentAudioUri = "android.resource://$packageName/raw/silent_audio"
-
-            val fastMediaItem = MediaItem.Builder()
-                .setUri(silentAudioUri)
-                .setMediaId("yt_${track.id}")
-                .setMediaMetadata(metadata)
-                .build()
-
-            // FIX: silent_audio.mp3 sirf kuch second ka hai aur pehle loop set nahi tha,
-            // isliye kuch second baad hi yeh track khatam (STATE_ENDED) ho jata tha.
-            // Jaise hi yeh khatam hota, MediaSession ka underlying player "ended" state me
-            // chala jata - background me notification/seek bar gayab ho jata tha aur
-            // Android service ko foreground na maan ke thodi der me WebView audio + service
-            // dono ko rok/kill kar deta tha. REPEAT_MODE_ONE lagane se yeh keep-alive track
-            // hamesha loop karta rahega jab tak asli (WebView) audio chal raha hai.
-            controller.repeatMode = Player.REPEAT_MODE_ONE
-            controller.setMediaItem(fastMediaItem)
-            controller.prepare()
-            controller.play() // Service ko active rakhne ke liye silent audio play karna zaruri hai
-        }
-
-        youtubeBridge?.loadVideo(videoId)
-        startBufferingWatchdog(videoId)
-    }
-
-    private fun startBufferingWatchdog(videoId: String) {
-        bufferingWatchdogJob?.cancel()
-        bufferingWatchdogJob = scope.launch {
-            delay(bufferingTimeoutMs)
-            if (loadedYoutubeVideoId == videoId && _isBuffering.value && !hasReachedPlayingState) {
-                _isBuffering.value = false
-                registerPlaybackFailureAndMaybeStop()
-            }
-        }
-    }
-
-    private fun cancelBufferingWatchdog() {
-        bufferingWatchdogJob?.cancel()
-        bufferingWatchdogJob = null
-    }
-
-    fun pause() {
-        if (_currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-            youtubeBridge?.pause()
-            _isPlaying.value = false
-            runOnController { it.pause() } // Silent audio pause karna zaroori hai
-        } else {
-            runOnController { it.pause() }
-        }
-    }
-
-    fun resume() {
-        if (_currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-            youtubeBridge?.play()
-            _isPlaying.value = true
-            runOnController { it.play() } // Silent audio wapas start karo
-        } else {
-            runOnController { it.play() }
-        }
-    }
-
-    fun clearPlaybackError() {
-        _playbackError.value = null
-    }
-
-    fun stop() {
-        stopProgressTracker()
-        runOnController { it.stop() }
-        if (!isRelayAudio) youtubeBridge?.pause()
-        _isPlaying.value = false
-        _playbackPosition.value = 0L
-    }
-
-    fun stopAndDismiss() {
-        stop()
-        _currentTrack.value = null
-    }
-
-    fun seekTo(position: Long) {
-        if (_currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-            youtubeBridge?.seekTo(position / 1000f)
-        }
-        runOnController { it.seekTo(position) } // relay audio ke liye bhi ExoPlayer hi seek karta hai
-        _playbackPosition.value = position
-        if (!isApplyingRemote) onLocalSeek?.invoke(position)
-    }
-
-    fun onYoutubePlayerStateChanged(state: Int, currentTimeSec: Double, durationSec: Double, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        if (videoId != loadedYoutubeVideoId) return
-        when (state) {
-            1 -> { // PLAYING
-                _isPlaying.value = true
-                _isBuffering.value = false
-                hasReachedPlayingState = true
-                consecutivePlaybackFailures = 0
-                cancelBufferingWatchdog()
-                startProgressTracker()
-                if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
-                else onLocalPlayPause?.invoke(true, (currentTimeSec * 1000).toLong())
-            }
-            2 -> { // PAUSED
-                _isPlaying.value = false
-                _isBuffering.value = false
-                stopProgressTracker()
-                if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
-                else onLocalPlayPause?.invoke(false, (currentTimeSec * 1000).toLong())
-            }
-            3 -> _isBuffering.value = true // BUFFERING
-            0 -> { cancelBufferingWatchdog(); handleTrackEnded() } // ENDED
-        }
-        if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
-    }
-
-    fun onYoutubeTimeUpdate(currentTimeSec: Double, durationSec: Double, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        if (videoId != loadedYoutubeVideoId) return
-        val currentMs = (currentTimeSec * 1000).toLong()
-        _playbackPosition.value = currentMs
-        
-        // Background timeline ko asli YouTube timeline se thoda sync rakho
-        mediaController?.let {
-            if (Math.abs(it.currentPosition - currentMs) > 2000) {
-                it.seekTo(currentMs)
-            }
-        }
-        
-        if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
-    }
-
-    fun onYoutubePlayerError(errorCode: Int, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        if (videoId != loadedYoutubeVideoId) return
-        cancelBufferingWatchdog()
-        _isBuffering.value = false
-        _isPlaying.value = false
-        registerPlaybackFailureAndMaybeStop()
-    }
-
-    fun applyRemoteSongChange(song: Song) {
-        isApplyingRemote = true
-        try {
-            play(TrackSongBridge.toTrack(song))
-        } finally {
-            isApplyingRemote = false
-        }
-    }
-
-    fun applyRemotePlayPause(isPlaying: Boolean, positionMs: Long) {
-        isApplyingRemote = true
-        suppressNextPlayPauseBroadcast = true
-        try {
-            seekTo(positionMs)
-            if (isPlaying) resume() else pause()
-        } finally {
-            isApplyingRemote = false
-        }
-    }
-
-    fun applyRemoteSeek(positionMs: Long) {
-        isApplyingRemote = true
-        try {
-            seekTo(positionMs)
-        } finally {
-            isApplyingRemote = false
-        }
-    }
-
-    private fun startProgressTracker() {
-        stopProgressTracker()
-        progressJob = scope.launch {
-            while (true) {
-                if (_currentTrack.value?.source == TrackSource.ITUNES) {
-                    mediaController?.let {
-                        if (it.isPlaying) _playbackPosition.value = it.currentPosition.coerceAtLeast(0L)
+                    // Current song - all fields land together atomically, so this is
+                    // always internally consistent (no more "isPlaying updated but
+                    // positionMs still stale" in-between states).
+                    val songId = snapshot.child("songId").getValue(String::class.java)
+                    if (songId != null && songId != lastSongId) {
+                        lastSongId = songId
+                        if (!isEcho) {
+                            val songState = JamSongState(
+                                songId = songId,
+                                title = snapshot.child("title").getValue(String::class.java) ?: "",
+                                artist = snapshot.child("artist").getValue(String::class.java) ?: "",
+                                durationMs = snapshot.child("durationMs").getValue(Long::class.java) ?: 0L,
+                                source = snapshot.child("source").getValue(String::class.java) ?: "",
+                                streamUrl = snapshot.child("streamUrl").getValue(String::class.java) ?: "",
+                                genre = snapshot.child("genre").getValue(String::class.java) ?: "",
+                                artwork = snapshot.child("artwork").getValue(String::class.java) ?: ""
+                            )
+                            onRemoteSongChange?.invoke(songState.toSong())
+                        }
+                        // isEcho == true -> yeh humara apna hi pushSongChange wapas aaya
+                        // hai (koi doosra device nahi). MusicPlayer isse already play kar
+                        // raha hai, dobara play() call karke restart karne ki zaroorat nahi.
                     }
+
+                    // Play/pause + position
+                    val isPlaying = snapshot.child("isPlaying").getValue(Boolean::class.java) ?: false
+                    val positionMs = snapshot.child("positionMs").getValue(Long::class.java) ?: 0L
+                    // updatedAt is now the Firebase SERVER's clock (ServerValue.TIMESTAMP),
+                    // not the writer's device clock, so this compensation is only ever
+                    // off by the reader's own clock drift - not the writer's too.
+                    val updatedAt = snapshot.child("updatedAt").getValue(Long::class.java) ?: System.currentTimeMillis()
+
+                    // Account for network delay: if it's playing, add elapsed time since the update.
+                    val adjustedPosition = if (isPlaying) {
+                        positionMs + (System.currentTimeMillis() - updatedAt).coerceAtLeast(0L)
+                    } else {
+                        positionMs
+                    }
+
+                    if (isPlaying != lastIsPlaying) {
+                        lastIsPlaying = isPlaying
+                        if (!isEcho) {
+                            onRemotePlayPause?.invoke(isPlaying, adjustedPosition)
+                        }
+                        // isEcho == true -> humara apna hi pushPlayPause wapas aaya hai -
+                        // local player already isi state me hai, dobara resume()/pause()
+                        // call karke usse interrupt/restart karne ki zaroorat nahi (isi
+                        // wajah se gaana "chalu-band-chalu-band" karta tha).
+                    } else if (isPlaying && !isEcho) {
+                        // Playing but the state was just a position/seek update, aur yeh
+                        // kisi doosre device se aaya hai.
+                        onRemoteSeek?.invoke(adjustedPosition)
+                    }
+                } finally {
+                    isApplyingRemoteUpdate = false
                 }
-                delay(1000)
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                onLog?.invoke("Jam sync error: ${error.message}")
             }
         }
+        playbackListener = plListener
+        roomRef.child("playback").addValueEventListener(plListener)
     }
 
-    private fun stopProgressTracker() {
-        progressJob?.cancel()
-        progressJob = null
-    }
-
-    fun release() {
-        stopProgressTracker()
-        cancelBufferingWatchdog()
-        mediaController?.release()
-        mediaController = null
-        if (PlaybackBridge.onNext != null) PlaybackBridge.onNext = null
-        if (PlaybackBridge.onPrevious != null) PlaybackBridge.onPrevious = null
-    }
-}
-
-class SamplesPlayerManager {
-    private val _isPlaying = MutableStateFlow(false)
-    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
-
-    private val _playbackPosition = MutableStateFlow(0L)
-    val playbackPosition: StateFlow<Long> = _playbackPosition.asStateFlow()
-
-    private val _duration = MutableStateFlow(0L)
-    val duration: StateFlow<Long> = _duration.asStateFlow()
-
-    private val _isBuffering = MutableStateFlow(true)
-    val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow()
-
-    var activePlayer: androidx.media3.exoplayer.ExoPlayer? = null
-
-    fun reportActiveState(isPlaying: Boolean, isBuffering: Boolean, positionMs: Long, durationMs: Long) {
-        _isPlaying.value = isPlaying
-        _isBuffering.value = isBuffering
-        _playbackPosition.value = positionMs
-        if (durationMs > 0) _duration.value = durationMs
-    }
-
-    fun togglePlayPause() {
-        val player = activePlayer ?: return
-        if (player.isPlaying) player.pause() else player.play()
-    }
-
-    fun pause() {
-        activePlayer?.pause()
+    private fun generateRoomCode(): String {
+        val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no confusing chars like 0/O, 1/I
+        return "NIR" + (1..4).map { chars.random() }.joinToString("")
     }
 }
