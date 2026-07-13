@@ -384,6 +384,7 @@ class MusicPlayer(
                 .setMediaMetadata(metadata)
                 .build()
 
+            controller.repeatMode = Player.REPEAT_MODE_OFF // silent-audio fallback repeat na reh jaye
             controller.setMediaItem(mediaItem)
             controller.prepare()
             controller.play()
@@ -434,6 +435,7 @@ class MusicPlayer(
                         .setMediaMetadata(metadata)
                         .build()
 
+                    controller.repeatMode = Player.REPEAT_MODE_OFF // silent-audio fallback repeat na reh jaye
                     controller.setMediaItem(mediaItem)
                     controller.prepare()
                     controller.play()
@@ -476,6 +478,14 @@ class MusicPlayer(
                 .setMediaMetadata(metadata)
                 .build()
 
+            // FIX: silent_audio.mp3 sirf kuch second ka hai aur pehle loop set nahi tha,
+            // isliye kuch second baad hi yeh track khatam (STATE_ENDED) ho jata tha.
+            // Jaise hi yeh khatam hota, MediaSession ka underlying player "ended" state me
+            // chala jata - background me notification/seek bar gayab ho jata tha aur
+            // Android service ko foreground na maan ke thodi der me WebView audio + service
+            // dono ko rok/kill kar deta tha. REPEAT_MODE_ONE lagane se yeh keep-alive track
+            // hamesha loop karta rahega jab tak asli (WebView) audio chal raha hai.
+            controller.repeatMode = Player.REPEAT_MODE_ONE
             controller.setMediaItem(fastMediaItem)
             controller.prepare()
             controller.play() // Service ko active rakhne ke liye silent audio play karna zaruri hai
