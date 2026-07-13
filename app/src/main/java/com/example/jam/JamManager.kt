@@ -113,6 +113,18 @@ class JamManager {
     private var participantsListener: ValueEventListener? = null
     private var myUid: String? = null
 
+    // BUG FIX: Firebase apne hi device ke likhe hue data ko bhi turant wapas listener
+    // me "echo" kar deta hai (local cache se), aur pehle wale code me is echo aur ek
+    // dusre device se aaye asli remote change me koi farak nahi kiya jata tha. Isse
+    // hota yeh tha ki jaise hi hum khud gaana play/change karte, apna hi push wapas
+    // "remote change" bankar aata aur MusicPlayer.play()/applyRemotePlayPause() ko
+    // dobara trigger kar deta - gaana restart ho jata ya turant pause jaisa dikhta.
+    // Ab push karne se theek pehle yahan "yeh mera apna pending write hai" note kar
+    // lete hain, aur listener me apna hi echo mile to use sirf state sync ke liye use
+    // karte hain, dobara onRemote* callback fire nahi karte.
+    private var pendingLocalSongId: String? = null
+    private var pendingLocalIsPlaying: Boolean? = null
+
     // Callbacks the ViewModel wires up to actually control local playback / UI
     var onRemoteSongChange: ((Song) -> Unit)? = null
     var onRemotePlayPause: ((isPlaying: Boolean, positionMs: Long) -> Unit)? = null
@@ -219,6 +231,7 @@ class JamManager {
     fun pushSongChange(song: Song) {
         val code = roomCode ?: return
         if (isApplyingRemoteUpdate) return
+        pendingLocalSongId = song.id
         val playbackRef = db.child("jams").child(code).child("playback")
         val updates = mutableMapOf<String, Any?>(
             "positionMs" to 0L,
@@ -232,6 +245,7 @@ class JamManager {
     fun pushPlayPause(isPlaying: Boolean, positionMs: Long) {
         val code = roomCode ?: return
         if (isApplyingRemoteUpdate) return
+        pendingLocalIsPlaying = isPlaying
         val playbackRef = db.child("jams").child(code).child("playback")
         playbackRef.updateChildren(
             mapOf(
@@ -312,17 +326,24 @@ class JamManager {
                     val songId = snapshot.child("songId").getValue(String::class.java)
                     if (songId != null && songId != lastSongId) {
                         lastSongId = songId
-                        val songState = JamSongState(
-                            songId = songId,
-                            title = snapshot.child("title").getValue(String::class.java) ?: "",
-                            artist = snapshot.child("artist").getValue(String::class.java) ?: "",
-                            durationMs = snapshot.child("durationMs").getValue(Long::class.java) ?: 0L,
-                            source = snapshot.child("source").getValue(String::class.java) ?: "",
-                            streamUrl = snapshot.child("streamUrl").getValue(String::class.java) ?: "",
-                            genre = snapshot.child("genre").getValue(String::class.java) ?: "",
-                            artwork = snapshot.child("artwork").getValue(String::class.java) ?: ""
-                        )
-                        onRemoteSongChange?.invoke(songState.toSong())
+                        if (songId == pendingLocalSongId) {
+                            // Yeh humare apne pushSongChange ka echo hai, koi doosra
+                            // device nahi - MusicPlayer isse already play kar raha hai,
+                            // dobara play() call karke restart karne ki zaroorat nahi.
+                            pendingLocalSongId = null
+                        } else {
+                            val songState = JamSongState(
+                                songId = songId,
+                                title = snapshot.child("title").getValue(String::class.java) ?: "",
+                                artist = snapshot.child("artist").getValue(String::class.java) ?: "",
+                                durationMs = snapshot.child("durationMs").getValue(Long::class.java) ?: 0L,
+                                source = snapshot.child("source").getValue(String::class.java) ?: "",
+                                streamUrl = snapshot.child("streamUrl").getValue(String::class.java) ?: "",
+                                genre = snapshot.child("genre").getValue(String::class.java) ?: "",
+                                artwork = snapshot.child("artwork").getValue(String::class.java) ?: ""
+                            )
+                            onRemoteSongChange?.invoke(songState.toSong())
+                        }
                     }
 
                     // Play/pause + position
@@ -342,7 +363,15 @@ class JamManager {
 
                     if (isPlaying != lastIsPlaying) {
                         lastIsPlaying = isPlaying
-                        onRemotePlayPause?.invoke(isPlaying, adjustedPosition)
+                        if (pendingLocalIsPlaying != null && isPlaying == pendingLocalIsPlaying) {
+                            // Yeh humare apne pushPlayPause ka echo hai - local player
+                            // already isi state me hai, dobara resume()/pause() call
+                            // karke usse interrupt/restart karne ki zaroorat nahi
+                            // (isi wajah se "play dabao to pause ho jata tha" hota tha).
+                            pendingLocalIsPlaying = null
+                        } else {
+                            onRemotePlayPause?.invoke(isPlaying, adjustedPosition)
+                        }
                     } else if (isPlaying) {
                         // Playing but the state was just a position/seek update
                         onRemoteSeek?.invoke(adjustedPosition)
