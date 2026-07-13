@@ -89,28 +89,27 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
-      # GEMINI_API_KEY / YOUTUBE_API_KEY: agar GitHub repo secrets set hain to
-      # .env bana denge, warna Secrets Gradle Plugin apne aap .env.example
-      # (placeholder) use kar lega, build fail nahi hogi.
+      # GEMINI_API_KEY: agar GitHub repo secret set hai to .env bana denge.
+      # RELAY_BASE_URL: sirf apne Netlify proxy site ka URL hai (e.g.
+      # https://your-proxy-site.netlify.app/api/) - koi secret/key nahi hai,
+      # isliye repo secret na ho to bhi .env.example ka placeholder theek hai
+      # (par aap apna real proxy URL yahan bhi secret ke roop me daal sakte ho).
+      # NOTE: YOUTUBE_API_KEY aur RELAY_API_KEY ab is workflow me nahi likhe
+      # jaate - woh keys ab kabhi bhi app/APK me embed nahi hoti. Woh sirf
+      # Netlify proxy (/netlify-proxy) ke environment variables me rehti hain,
+      # server-side, jahan se app ka koi access nahi hai. Agar warna nahi
+      # milega to build fail nahi hogi.
       - name: Write .env from repository secrets (optional)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           RELAY_BASE_URL: ${{ secrets.RELAY_BASE_URL }}
-          RELAY_API_KEY: ${{ secrets.RELAY_API_KEY }}
         run: |
           rm -f .env
           if [ -n "$GEMINI_API_KEY" ]; then
             echo "GEMINI_API_KEY=$GEMINI_API_KEY" >> .env
           fi
-          if [ -n "$YOUTUBE_API_KEY" ]; then
-            echo "YOUTUBE_API_KEY=$YOUTUBE_API_KEY" >> .env
-          fi
           if [ -n "$RELAY_BASE_URL" ]; then
             echo "RELAY_BASE_URL=$RELAY_BASE_URL" >> .env
-          fi
-          if [ -n "$RELAY_API_KEY" ]; then
-            echo "RELAY_API_KEY=$RELAY_API_KEY" >> .env
           fi
           if [ -f .env ]; then
             echo "Wrote .env from repository secrets."
