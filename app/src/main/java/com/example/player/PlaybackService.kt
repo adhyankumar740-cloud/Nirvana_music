@@ -3,6 +3,7 @@ package com.example.player
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -61,6 +62,64 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    // System control-center/lock-screen ka seek bar isi Player object se apni
+    // position/duration/state padhta hai. Jab tak asli gaana relay-resolved
+    // audio (ya iTunes) se seedha ExoPlayer pe baj raha hai, uski apni values
+    // hi sahi hain - koi wrapping zaroori nahi. Lekin jab (SECONDARY) WebView
+    // fallback active ho aur ExoPlayer sirf silent keep-alive clip loop kar
+    // raha ho, tab uski chhoti si duration/position ki jagah hum
+    // PlaybackBridge me MusicPlayer dwara update ki hui "virtual" (asli
+    // gaane ki) values dikhate hain - taaki seek bar sahi length dikhaye,
+    // sahi position pe aage badhe, aur baar-baar reset/flicker na ho.
+    private class NotificationFacadePlayer(player: ExoPlayer) : ForwardingPlayer(player) {
+        override fun getCurrentPosition(): Long =
+            if (PlaybackBridge.virtualModeActive) PlaybackBridge.virtualPositionMs
+            else super.getCurrentPosition()
+
+        override fun getDuration(): Long =
+            if (PlaybackBridge.virtualModeActive && PlaybackBridge.virtualDurationMs > 0) PlaybackBridge.virtualDurationMs
+            else super.getDuration()
+
+        override fun getContentDuration(): Long = getDuration()
+
+        override fun getBufferedPosition(): Long =
+            if (PlaybackBridge.virtualModeActive) PlaybackBridge.virtualPositionMs
+            else super.getBufferedPosition()
+
+        override fun getContentBufferedPosition(): Long = getBufferedPosition()
+
+        override fun getBufferedPercentage(): Int =
+            if (PlaybackBridge.virtualModeActive) 100 else super.getBufferedPercentage()
+
+        // Silent clip REPEAT_MODE_ONE ke saath baar-baar khud STATE_BUFFERING/
+        // STATE_ENDED se guzarta rehta hai jab woh loop karta hai - agar yeh
+        // seedha control-center tak pahunch jaye to notification/seek bar
+        // baar-baar flicker karta ya gayab ho jata (yehi original bug tha).
+        // Virtual mode me hum sirf MusicPlayer ki asli buffering state dikhate
+        // hain, silent clip ki nahi.
+        override fun getPlaybackState(): Int {
+            if (PlaybackBridge.virtualModeActive) {
+                return if (PlaybackBridge.virtualIsBuffering) Player.STATE_BUFFERING else Player.STATE_READY
+            }
+            return super.getPlaybackState()
+        }
+
+        override fun isPlayingAd(): Boolean = false
+
+        // Lock-screen/notification seek bar ko drag karne par yeh call hota
+        // hai. Virtual mode me silent clip ko seek karne ka koi fayda nahi
+        // (uski duration hi kuch second ki hai) - iski jagah asli WebView
+        // video ko seek karo via MusicPlayer.
+        override fun seekTo(positionMs: Long) {
+            if (PlaybackBridge.virtualModeActive) {
+                PlaybackBridge.virtualPositionMs = positionMs
+                PlaybackBridge.onSeek?.invoke(positionMs)
+            } else {
+                super.seekTo(positionMs)
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         val audioAttributes = AudioAttributes.Builder()
@@ -84,7 +143,7 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .build()
 
-        mediaSession = MediaSession.Builder(this, player)
+        mediaSession = MediaSession.Builder(this, NotificationFacadePlayer(player))
             .setCallback(sessionCallback)
             .build()
     }
