@@ -22,7 +22,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
@@ -36,14 +35,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -82,13 +79,6 @@ fun HomeScreen(
     val searchError by musicViewModel.searchError.collectAsState()
     val homeTracks by musicViewModel.homeTracks.collectAsState()
 
-    val currentTrack by musicViewModel.player.currentTrack.collectAsState()
-    val isPlaying by musicViewModel.player.isPlaying.collectAsState()
-    val playbackPos by musicViewModel.player.playbackPosition.collectAsState()
-    val duration by musicViewModel.player.duration.collectAsState()
-    val isBuffering by musicViewModel.player.isBuffering.collectAsState()
-
-    var showPlayerDetail by remember { mutableStateOf(false) }
     var selectedCategory by remember { mutableStateOf("Chill") }
     var trackPendingPlaylistAdd by remember { mutableStateOf<Track?>(null) }
 
@@ -102,7 +92,6 @@ fun HomeScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(bottom = if (currentTrack != null) 72.dp else 0.dp)
         ) {
             // Header
             Row(
@@ -296,66 +285,6 @@ fun HomeScreen(
                         }
                     }
                 }
-            }
-        }
-
-        // Bottom Player Tray
-        if (currentTrack != null) {
-            BottomPlayerTray(
-                track = currentTrack!!,
-                isPlaying = isPlaying,
-                isBuffering = isBuffering,
-                onPlayPauseClick = {
-                    if (isPlaying) musicViewModel.player.pause() else musicViewModel.player.resume()
-                },
-                onNextClick = { musicViewModel.player.skipNext() },
-                onCloseClick = { musicViewModel.player.stopAndDismiss() },
-                onTrayClick = { showPlayerDetail = true }
-            )
-        }
-
-        // Fullscreen Player Detail Bottom Sheet
-        if (showPlayerDetail && currentTrack != null) {
-            val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-            ModalBottomSheet(
-                onDismissRequest = { showPlayerDetail = false },
-                sheetState = sheetState,
-                containerColor = MaterialTheme.colorScheme.background,
-                dragHandle = {
-                    IconButton(onClick = { showPlayerDetail = false }) {
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
-                            contentDescription = "Close player detail",
-                            tint = Color.White
-                        )
-                    }
-                }
-            ) {
-                NowPlayingScreen(
-                    track = currentTrack!!,
-                    isPlaying = isPlaying,
-                    isBuffering = isBuffering,
-                    isResolvingAutoplay = musicViewModel.player.isResolvingAutoplay.collectAsState().value,
-                    playbackPos = playbackPos,
-                    duration = duration,
-                    queue = musicViewModel.player.queue.collectAsState().value,
-                    queueIndex = musicViewModel.player.queueIndex.collectAsState().value,
-                    isShuffleEnabled = musicViewModel.player.isShuffleEnabled.collectAsState().value,
-                    repeatMode = musicViewModel.player.repeatMode.collectAsState().value,
-                    lyrics = musicViewModel.lyrics.collectAsState().value,
-                    isLoadingLyrics = musicViewModel.isLoadingLyrics.collectAsState().value,
-                    onPlayPauseClick = {
-                        if (isPlaying) musicViewModel.player.pause() else musicViewModel.player.resume()
-                    },
-                    onPrevClick = { musicViewModel.player.skipPrevious() },
-                    onNextClick = { musicViewModel.player.skipNext() },
-                    onSeek = { musicViewModel.player.seekTo(it) },
-                    onFavoriteClick = { musicViewModel.toggleFavorite(currentTrack!!) },
-                    onShuffleClick = { musicViewModel.player.toggleShuffle() },
-                    onRepeatClick = { musicViewModel.player.cycleRepeatMode() },
-                    onQueueItemClick = { musicViewModel.player.playQueueItem(it) },
-                    onQueueItemRemove = { musicViewModel.player.removeFromQueue(it) }
-                )
             }
         }
 
