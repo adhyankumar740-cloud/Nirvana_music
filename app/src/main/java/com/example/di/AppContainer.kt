@@ -2,7 +2,9 @@ package com.example.di
 
 import android.content.Context
 import com.example.BuildConfig
+import com.example.announcement.AnnouncementManager
 import com.example.data.database.MusicDatabase
+import com.example.data.local.OnboardingPreferences
 import com.example.data.network.ITunesService
 import com.example.data.network.LrcLibService
 import com.example.data.network.RelayService
@@ -41,8 +43,19 @@ class AppContainer(private val context: Context) {
             savedTrackDao = database.savedTrackDao(),
             searchHistoryDao = database.searchHistoryDao(),
             playHistoryDao = database.playHistoryDao(),
-            playlistDao = database.playlistDao()
+            playlistDao = database.playlistDao(),
+            // Seeds recommendations with the genres/artists picked during
+            // first-launch onboarding, so a brand-new user's Home feed
+            // reflects their taste before any real listening history exists.
+            onboardingGenres = OnboardingPreferences.getSelectedGenres(context),
+            onboardingArtists = OnboardingPreferences.getSelectedArtists(context)
         )
+    }
+
+    // Reads announcement/update popups pushed from the web Admin Panel
+    // (public/admin/index.html) via Firebase Realtime Database.
+    val announcementManager: AnnouncementManager by lazy {
+        AnnouncementManager(context)
     }
 
     // Real cross-device Jam (Firebase Realtime Database). Requires a Firebase
