@@ -7,6 +7,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Lets the app prompt the user to exempt it from battery optimization.
+         Without this, many OEMs (MIUI/Xiaomi, Vivo, Oppo, Realme, Asus, etc.)
+         still kill the playback service/process in the background even
+         though it's a correctly-declared foreground service - this is the
+         usual cause of "song stops in background". -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:allowBackup="true"
