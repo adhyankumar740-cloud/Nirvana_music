@@ -5,6 +5,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
@@ -95,8 +96,28 @@ class PlaybackService : MediaSessionService() {
         // hoti hai (aur wo bhi cache me save ho jaata hai agli baar ke liye).
         val cacheDataSourceFactory = PlaybackCache.cacheDataSourceFactory(this)
 
+        // BUFFERING FIX: ExoPlayer's own defaults (bufferForPlaybackMs=2500,
+        // bufferForPlaybackAfterRebufferMs=5000) are tuned for video, where a
+        // deep buffer matters a lot more. For a low-bitrate audio-only stream,
+        // that's 2.5s+ of dead air before a track even starts, and up to 5s of
+        // stall every time the network hiccups mid-song - a big chunk of what
+        // felt like "too much buffering" here. minBufferMs/maxBufferMs (how far
+        // ahead ExoPlayer keeps loading) are left at the defaults - only the
+        // "how much do I need before I'm allowed to actually start/resume
+        // playing" thresholds are lowered, so it starts noticeably sooner
+        // without changing how much gets buffered overall.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+                DefaultLoadControl.DEFAULT_MAX_BUFFER_MS,
+                1000,
+                1500
+            )
+            .build()
+
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory))
+            .setLoadControl(loadControl)
             // FIX: ExoPlayer ab hamesha asli, audible track bajata hai (relay-
             // resolved YouTube audio ya iTunes preview) - purane silent
             // keep-alive setup ke ulat, isko ab audio focus properly handle
