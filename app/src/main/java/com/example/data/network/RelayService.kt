@@ -88,10 +88,8 @@ interface RelayService {
 
 /**
  * Converts a relay /search result into the app's unified [Track] model.
- * Uses the SAME id scheme as YouTubeVideoDetailItem.toTrack()
- * (videoId.hashCode()) so favorites/downloads/history stay consistent
- * regardless of whether a video was found via the relay or the YouTube
- * Data API fallback.
+ * Uses videoId.hashCode() as the id so favorites/downloads/history stay
+ * consistent across resolves of the same video.
  */
 fun RelaySearchTrack.toTrack(): Track = Track(
     id = video_id.hashCode().toLong(),
