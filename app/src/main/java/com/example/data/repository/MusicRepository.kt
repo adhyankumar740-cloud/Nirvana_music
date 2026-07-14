@@ -332,12 +332,29 @@ class MusicRepository(
     /** Finds the single best-matching video for a title+artist (used by Samples' "Play Full Song" button). */
     suspend fun findBestYouTubeMatch(title: String, artist: String): Track? = withContext(Dispatchers.IO) {
         try {
-            val relayResponse = relayService.search(query = "$title $artist", limit = 1, relayKey = relayApiKey.ifBlank { null })
-            relayResponse.results.firstOrNull()?.relayTrackToTrack()
+            // limit=1 used to mean "whatever the top hit is" - including 1hr+ mixes,
+            // compilations, or full albums that share the song's title/artist. Those
+            // take forever for the relay to download/convert on first resolve, which
+            // looked like endless buffering client-side. Pulling more candidates and
+            // filtering to a normal single-song duration avoids that.
+            val relayResponse = relayService.search(query = "$title $artist", limit = 10, relayKey = relayApiKey.ifBlank { null })
+            val candidates = relayResponse.results.map { it.relayTrackToTrack() }
+            candidates.firstOrNull { isNormalSongDuration(it) } ?: candidates.firstOrNull()
         } catch (e: Exception) {
             e.printStackTrace()
             null
         }
+    }
+
+    /**
+     * True if [track]'s duration looks like a single normal song rather than a
+     * multi-hour mix/compilation/full-album upload (or a near-zero-length
+     * junk result). Used to filter relay search results for both
+     * [findBestYouTubeMatch] and [getAutoplayRecommendation].
+     */
+    private fun isNormalSongDuration(track: Track): Boolean {
+        val seconds = track.durationMs / 1000L
+        return seconds in 40..600
     }
 
     /**
@@ -423,7 +440,7 @@ class MusicRepository(
                 }
 
                 val candidate = candidateTracks
-                    .filter { it.id !in excludeIds }
+                    .filter { it.id !in excludeIds && isNormalSongDuration(it) }
                     .firstOrNull { normalizedSongKey(it) !in excludeKeys }
                 // Carry the resolved genre forward so the next hop in an autoplay
                 // chain doesn't have to re-look it up and doesn't drift genre.
