@@ -359,10 +359,11 @@ fun MainAppLayout(
             // chat noticeably further up than the keyboard alone would require.
             // Dropping the reservation while the IME is visible fixes that.
             val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+            val reserveTrayGap = currentTrack != null && !imeVisible && selectedTab != "jam"
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(bottom = if (currentTrack != null && !imeVisible) 72.dp else 0.dp)
+                    .padding(bottom = if (reserveTrayGap) 72.dp else 0.dp)
             ) {
                 when (selectedTab) {
                     "home" -> HomeScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
@@ -376,7 +377,10 @@ fun MainAppLayout(
             // above the bottom nav bar, visible from every tab. This is what
             // now fills the space that used to be an empty black bar left by
             // the (now hidden) YouTube WebView.
-            if (currentTrack != null) {
+            // Skipped on the Jam tab specifically: JamScreen already shows a
+            // compact "now playing" chip in its own header, so the tray was
+            // just redundant clutter sitting right above the chat input there.
+            if (currentTrack != null && selectedTab != "jam") {
                 BottomPlayerTray(
                     track = currentTrack!!,
                     isPlaying = isPlaying,
