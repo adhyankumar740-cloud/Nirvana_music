@@ -3,7 +3,6 @@ package com.example.player
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
-import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -19,12 +18,14 @@ class PlaybackService : MediaSessionService() {
     lateinit var player: ExoPlayer
         private set
 
-    // ExoPlayer yahan sirf silent keep-alive track chalata hai, isliye iske apne
-    // timeline mein kabhi "next" nahi hota - system control center is wajah se
-    // Next button hide/disable kar deta tha. Yeh callback next/previous ko
-    // hamesha available dikhata hai aur press hone par real logic
-    // (MusicPlayer.skipNext/skipPrevious) ko call karta hai, default
-    // ExoPlayer seek-to-next/previous behaviour ko chalne diye bina.
+    // ExoPlayer yahan hamesha ek hi media item ke saath kaam karta hai (poori
+    // playlist load nahi hoti, agla/pichla track queue+autoplay logic se app
+    // ke andar decide hota hai), isliye iske apne timeline mein kabhi "next"
+    // nahi hota - system control center is wajah se Next button hide/disable
+    // kar deta tha. Yeh callback next/previous ko hamesha available dikhata
+    // hai aur press hone par real logic (MusicPlayer.skipNext/skipPrevious)
+    // ko call karta hai, default ExoPlayer seek-to-next/previous behaviour ko
+    // chalne diye bina.
     private val sessionCallback = object : MediaSession.Callback {
         override fun onConnect(
             session: MediaSession,
@@ -69,64 +70,6 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    // System control-center/lock-screen ka seek bar isi Player object se apni
-    // position/duration/state padhta hai. Jab tak asli gaana relay-resolved
-    // audio (ya iTunes) se seedha ExoPlayer pe baj raha hai, uski apni values
-    // hi sahi hain - koi wrapping zaroori nahi. Lekin jab (SECONDARY) WebView
-    // fallback active ho aur ExoPlayer sirf silent keep-alive clip loop kar
-    // raha ho, tab uski chhoti si duration/position ki jagah hum
-    // PlaybackBridge me MusicPlayer dwara update ki hui "virtual" (asli
-    // gaane ki) values dikhate hain - taaki seek bar sahi length dikhaye,
-    // sahi position pe aage badhe, aur baar-baar reset/flicker na ho.
-    private class NotificationFacadePlayer(player: ExoPlayer) : ForwardingPlayer(player) {
-        override fun getCurrentPosition(): Long =
-            if (PlaybackBridge.virtualModeActive) PlaybackBridge.virtualPositionMs
-            else super.getCurrentPosition()
-
-        override fun getDuration(): Long =
-            if (PlaybackBridge.virtualModeActive && PlaybackBridge.virtualDurationMs > 0) PlaybackBridge.virtualDurationMs
-            else super.getDuration()
-
-        override fun getContentDuration(): Long = getDuration()
-
-        override fun getBufferedPosition(): Long =
-            if (PlaybackBridge.virtualModeActive) PlaybackBridge.virtualPositionMs
-            else super.getBufferedPosition()
-
-        override fun getContentBufferedPosition(): Long = getBufferedPosition()
-
-        override fun getBufferedPercentage(): Int =
-            if (PlaybackBridge.virtualModeActive) 100 else super.getBufferedPercentage()
-
-        // Silent clip REPEAT_MODE_ONE ke saath baar-baar khud STATE_BUFFERING/
-        // STATE_ENDED se guzarta rehta hai jab woh loop karta hai - agar yeh
-        // seedha control-center tak pahunch jaye to notification/seek bar
-        // baar-baar flicker karta ya gayab ho jata (yehi original bug tha).
-        // Virtual mode me hum sirf MusicPlayer ki asli buffering state dikhate
-        // hain, silent clip ki nahi.
-        override fun getPlaybackState(): Int {
-            if (PlaybackBridge.virtualModeActive) {
-                return if (PlaybackBridge.virtualIsBuffering) Player.STATE_BUFFERING else Player.STATE_READY
-            }
-            return super.getPlaybackState()
-        }
-
-        override fun isPlayingAd(): Boolean = false
-
-        // Lock-screen/notification seek bar ko drag karne par yeh call hota
-        // hai. Virtual mode me silent clip ko seek karne ka koi fayda nahi
-        // (uski duration hi kuch second ki hai) - iski jagah asli WebView
-        // video ko seek karo via MusicPlayer.
-        override fun seekTo(positionMs: Long) {
-            if (PlaybackBridge.virtualModeActive) {
-                PlaybackBridge.virtualPositionMs = positionMs
-                PlaybackBridge.onSeek?.invoke(positionMs)
-            } else {
-                super.seekTo(positionMs)
-            }
-        }
-    }
-
     override fun onCreate() {
         super.onCreate()
         val audioAttributes = AudioAttributes.Builder()
@@ -146,7 +89,12 @@ class PlaybackService : MediaSessionService() {
 
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpDataSourceFactory))
-            .setAudioAttributes(audioAttributes, false) // silent track hai, isko audio focus fight karne ki zaroorat nahi
+            // FIX: ExoPlayer ab hamesha asli, audible track bajata hai (relay-
+            // resolved YouTube audio ya iTunes preview) - purane silent
+            // keep-alive setup ke ulat, isko ab audio focus properly handle
+            // karna zaroori hai (calls pe pause, duck for notifications, doosre
+            // music app ke upar se na bajna), isliye 'true'.
+            .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             // FIX: background playback (screen off) needs a real audio stream
             // to keep buffering over the network without the CPU going to
@@ -158,7 +106,7 @@ class PlaybackService : MediaSessionService() {
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
 
-        mediaSession = MediaSession.Builder(this, NotificationFacadePlayer(player))
+        mediaSession = MediaSession.Builder(this, player)
             .setCallback(sessionCallback)
             .build()
     }
