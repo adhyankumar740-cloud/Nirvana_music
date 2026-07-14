@@ -341,7 +341,7 @@ class MusicPlayer(
         }
     }
 
-    private fun retryRelayResolve(track: Track, videoId: String, catchUp: RemoteCatchUp?) {
+    private fun retryRelayResolve(track: Track, videoId: String, catchUp: RemoteCatchUp?, autoPlay: Boolean = true) {
         scope.launch {
             try {
                 val response = withContext(Dispatchers.IO) {
@@ -363,7 +363,7 @@ class MusicPlayer(
                     controller.repeatMode = Player.REPEAT_MODE_OFF
                     controller.setMediaItem(mediaItem)
                     controller.prepare()
-                    controller.play()
+                    if (autoPlay) controller.play() else controller.pause()
                 }
                 resolveAndApplyCatchUp(catchUp, track.durationMs)
                 startProgressTracker()
@@ -538,12 +538,12 @@ class MusicPlayer(
         }
     }
 
-    fun play(track: Track) {
+    fun play(track: Track, autoPlay: Boolean = true) {
         trackRecentlyPlayed(track)
         if (track.source == TrackSource.YOUTUBE) {
-            playYoutubeTrack(track)
+            playYoutubeTrack(track, autoPlay)
         } else {
-            playItunesTrack(track)
+            playItunesTrack(track, autoPlay)
         }
         preloadNextTrack()
     }
@@ -622,7 +622,7 @@ class MusicPlayer(
         }
     }
 
-    private fun playItunesTrack(track: Track) {
+    private fun playItunesTrack(track: Track, autoPlay: Boolean = true) {
         cancelBufferingWatchdog()
         _currentTrack.value = track
         if (!isApplyingRemote) onLocalSongChange?.invoke(track)
@@ -648,13 +648,15 @@ class MusicPlayer(
             controller.repeatMode = Player.REPEAT_MODE_OFF
             controller.setMediaItem(mediaItem)
             controller.prepare()
-            controller.play()
+            // ROOM-STATE FIX: honour the caller's intended play state instead of
+            // always forcing play() - see playYoutubeTrack for the full reasoning.
+            if (autoPlay) controller.play() else controller.pause()
         }
         resolveAndApplyCatchUp(catchUp, track.durationMs)
         startProgressTracker()
     }
 
-    private fun playYoutubeTrack(track: Track) {
+    private fun playYoutubeTrack(track: Track, autoPlay: Boolean = true) {
         relayRetriedForVideoId = null
         cancelBufferingWatchdog()
         _currentTrack.value = track
@@ -712,7 +714,11 @@ class MusicPlayer(
                     controller.repeatMode = Player.REPEAT_MODE_OFF
                     controller.setMediaItem(mediaItem)
                     controller.prepare()
-                    controller.play()
+                    // ROOM-STATE FIX: a remote song change that arrives while the
+                    // Jam room is paused (e.g. joining a room where someone already
+                    // queued a track but nobody hit play) must stay paused here too,
+                    // instead of unconditionally starting audio on this device.
+                    if (autoPlay) controller.play() else controller.pause()
                 }
                 // SYNC-DRIFT FIX: only now (once THIS device's resolve has actually
                 // finished) do we know how long it took - so only now can we correctly
@@ -725,7 +731,7 @@ class MusicPlayer(
                 if (loadedYoutubeVideoId != videoId) return@launch
                 if (relayRetriedForVideoId != videoId) {
                     relayRetriedForVideoId = videoId
-                    retryRelayResolve(track, videoId, catchUp)
+                    retryRelayResolve(track, videoId, catchUp, autoPlay)
                 } else {
                     _playbackError.value = "Yeh gaana stream nahi ho paya - relay se connect nahi ho saka."
                     registerPlaybackFailureAndMaybeStop()
@@ -787,8 +793,24 @@ class MusicPlayer(
 
     fun applyRemoteSongChange(song: Song, positionMs: Long, isPlaying: Boolean, updatedAtServerMs: Long) {
         isApplyingRemote = true
-        suppressNextPlayPauseBroadcast = true
-        suppressPlayPauseArmedAt = System.currentTimeMillis()
+        // STUCK-FLAG FIX (root cause of the intermittent "play/pause loop" and
+        // sync randomly breaking after a song change): suppressNextPlayPauseBroadcast
+        // used to be armed unconditionally here, but it is only ever *disarmed* by
+        // the onPlayWhenReadyChanged callback it's meant to catch. If this device's
+        // playWhenReady already equals the room's target `isPlaying` - the common
+        // case, since a device that's already playing usually stays playing across
+        // a song change - play()/pause() below causes no real change, so that
+        // callback never fires, and the flag was left permanently "hot" for up to
+        // suppressExpiryMs (60s). Any genuinely local pause/resume the user made
+        // in that window then got silently swallowed and never reached Firebase -
+        // that's what looked like sync randomly failing or playback getting stuck
+        // right after a track switched. Now we only arm the flag when a real
+        // transition is actually expected, so it can never outlive its callback.
+        val willChangePlayState = mediaController?.playWhenReady != isPlaying
+        if (willChangePlayState) {
+            suppressNextPlayPauseBroadcast = true
+            suppressPlayPauseArmedAt = System.currentTimeMillis()
+        }
         // SYNC-DRIFT FIX: stash the room's timing state so that once THIS device's
         // own relay resolve/buffering finishes (which can take a few seconds longer
         // or shorter than any other device's), playYoutubeTrack()/playItunesTrack()
@@ -796,7 +818,12 @@ class MusicPlayer(
         // starting at 0:00 - see applyCatchUpSeek().
         pendingCatchUp = RemoteCatchUp(positionMs, isPlaying, updatedAtServerMs)
         try {
-            play(TrackSongBridge.toTrack(song))
+            // ROOM-STATE FIX: play() used to always force controller.play(),
+            // regardless of `isPlaying`. That meant joining (or receiving a song
+            // change in) a room that was genuinely paused made audio start
+            // playing anyway on every device that got the update - now the new
+            // track loads but only actually starts if the room is playing.
+            play(TrackSongBridge.toTrack(song), autoPlay = isPlaying)
         } finally {
             isApplyingRemote = false
         }
@@ -804,8 +831,13 @@ class MusicPlayer(
 
     fun applyRemotePlayPause(isPlaying: Boolean, positionMs: Long) {
         isApplyingRemote = true
-        suppressNextPlayPauseBroadcast = true
-        suppressPlayPauseArmedAt = System.currentTimeMillis()
+        // Same stuck-flag fix as applyRemoteSongChange above - only arm if this
+        // call will actually flip playWhenReady.
+        val willChangePlayState = mediaController?.playWhenReady != isPlaying
+        if (willChangePlayState) {
+            suppressNextPlayPauseBroadcast = true
+            suppressPlayPauseArmedAt = System.currentTimeMillis()
+        }
         try {
             seekTo(positionMs)
             if (isPlaying) resume() else pause()
