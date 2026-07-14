@@ -52,7 +52,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.example.announcement.Announcement
+import com.example.data.model.Track
 import com.example.di.AppContainer
+import com.example.ui.screens.AddToPlaylistDialog
 import com.example.ui.screens.AnnouncementDialog
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.BottomPlayerTray
@@ -243,6 +245,9 @@ fun MainAppLayout(
     val duration by musicViewModel.player.duration.collectAsState()
     val isBuffering by musicViewModel.player.isBuffering.collectAsState()
     var showPlayerDetail by remember { mutableStateOf(false) }
+    // "Add to Playlist" from the Now Playing screen - same reusable dialog
+    // Home/Search already use, just triggered from a different place.
+    var trackPendingPlaylistAdd by remember { mutableStateOf<Track?>(null) }
 
     Scaffold(
         snackbarHost = {
@@ -408,12 +413,21 @@ fun MainAppLayout(
                         onNextClick = { musicViewModel.player.skipNext() },
                         onSeek = { musicViewModel.player.seekTo(it) },
                         onFavoriteClick = { musicViewModel.toggleFavorite(currentTrack!!) },
+                        onAddToPlaylistClick = { trackPendingPlaylistAdd = currentTrack },
                         onShuffleClick = { musicViewModel.player.toggleShuffle() },
                         onRepeatClick = { musicViewModel.player.cycleRepeatMode() },
                         onQueueItemClick = { musicViewModel.player.playQueueItem(it) },
                         onQueueItemRemove = { musicViewModel.player.removeFromQueue(it) }
                     )
                 }
+            }
+
+            trackPendingPlaylistAdd?.let { track ->
+                AddToPlaylistDialog(
+                    track = track,
+                    playlistViewModel = playlistViewModel,
+                    onDismiss = { trackPendingPlaylistAdd = null }
+                )
             }
 
             // Admin Panel announcement popup - shown at most once per day.
