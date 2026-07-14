@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -217,11 +216,15 @@ private fun JamRoomContent(jamViewModel: JamViewModel) {
         }
     }
 
-    // imePadding() is required here: the app draws edge-to-edge
-    // (enableEdgeToEdge() in MainActivity), so without it the keyboard
-    // just overlaps the bottom input row instead of the layout resizing -
-    // you'd be typing but unable to see the input field or what you wrote.
-    Column(modifier = Modifier.fillMaxSize().imePadding()) {
+    // FIX: previously had its own imePadding() here too, ON TOP OF the
+    // Scaffold's innerPadding (Material3 Scaffold's default contentWindowInsets
+    // is WindowInsets.safeDrawing, which already includes ime) that MainActivity
+    // applies to this screen's parent Box. That meant the keyboard's height got
+    // reserved TWICE - once via Scaffold's innerPadding, once via this
+    // imePadding() - producing the large empty gap between the chat input and
+    // the keyboard. The parent Box in MainActivity already shrinks to make room
+    // for the keyboard, so this Column doesn't need to do it again.
+    Column(modifier = Modifier.fillMaxSize()) {
         // Jam Top Header
         Box(
             modifier = Modifier
