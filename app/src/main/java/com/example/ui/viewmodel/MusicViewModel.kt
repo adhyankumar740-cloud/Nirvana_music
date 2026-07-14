@@ -8,6 +8,7 @@ import com.example.data.model.Track
 import com.example.data.repository.MusicRepository
 import com.example.data.repository.SearchOutcome
 import com.example.player.MusicPlayer
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -37,6 +39,15 @@ class MusicViewModel(
     // as opposed to a search that succeeded but genuinely had zero matches.
     private val _searchError = MutableStateFlow<String?>(null)
     val searchError = _searchError.asStateFlow()
+
+    // Emits the current query text when the user taps "Retry" after a failed
+    // search. Needed because _searchQuery below is distinctUntilChanged'd (so
+    // typing the same text again doesn't re-fire the search) - without this,
+    // retrying a failed search required deleting a character and retyping it
+    // just to make the query "change" again. extraBufferCapacity = 1 so
+    // emit() never suspends/gets dropped if retrySearch() is called from a
+    // non-suspend context (a button's onClick).
+    private val _retrySearchTrigger = MutableSharedFlow<String>(extraBufferCapacity = 1)
 
     private val _homeTracks = MutableStateFlow<List<Track>>(emptyList())
     val homeTracks = _homeTracks.asStateFlow()
@@ -107,35 +118,39 @@ class MusicViewModel(
         // quota almost instantly even without "really" using search much.
         // Fix: wait for the user to pause typing, and collectLatest cancels
         // any still-in-flight request the moment a newer query comes in.
+        //
+        // Merged with _retrySearchTrigger (no debounce, no distinctUntilChanged)
+        // so tapping "Retry" after a failure re-runs the same query immediately,
+        // instead of silently doing nothing because the text didn't change.
         viewModelScope.launch {
-            _searchQuery
-                .debounce(400)
-                .distinctUntilChanged()
-                .collectLatest { query ->
-                    if (query.trim().isEmpty()) {
-                        _searchResults.value = emptyList()
-                        _searchError.value = null
-                        _isSearching.value = false
-                        return@collectLatest
-                    }
-                    _isSearching.value = true
-                    // Log search history for personalization. Fire-and-forget on
-                    // the same scope: this must never block/slow the actual search.
-                    launch { repository.recordSearchQuery(query) }
-                    repository.searchTracks(query).collectLatest { outcome ->
-                        when (outcome) {
-                            is SearchOutcome.Success -> {
-                                _searchResults.value = outcome.tracks
-                                _searchError.value = null
-                            }
-                            is SearchOutcome.Error -> {
-                                _searchResults.value = emptyList()
-                                _searchError.value = outcome.message
-                            }
+            merge(
+                _searchQuery.debounce(400).distinctUntilChanged(),
+                _retrySearchTrigger
+            ).collectLatest { query ->
+                if (query.trim().isEmpty()) {
+                    _searchResults.value = emptyList()
+                    _searchError.value = null
+                    _isSearching.value = false
+                    return@collectLatest
+                }
+                _isSearching.value = true
+                // Log search history for personalization. Fire-and-forget on
+                // the same scope: this must never block/slow the actual search.
+                launch { repository.recordSearchQuery(query) }
+                repository.searchTracks(query).collectLatest { outcome ->
+                    when (outcome) {
+                        is SearchOutcome.Success -> {
+                            _searchResults.value = outcome.tracks
+                            _searchError.value = null
+                        }
+                        is SearchOutcome.Error -> {
+                            _searchResults.value = emptyList()
+                            _searchError.value = outcome.message
                         }
                     }
-                    _isSearching.value = false
                 }
+                _isSearching.value = false
+            }
         }
     }
 
@@ -159,6 +174,18 @@ class MusicViewModel(
     /** Called on every keystroke - just updates state. The actual (debounced) API call happens in init{}. */
     fun search(query: String) {
         _searchQuery.value = query
+    }
+
+    /**
+     * Re-runs the search for whatever query is currently shown, without
+     * requiring the user to change the text first. Meant for a "Retry" action
+     * shown alongside [searchError] - a no-op if the query box is empty.
+     */
+    fun retrySearch() {
+        val query = _searchQuery.value
+        if (query.trim().isNotEmpty()) {
+            _retrySearchTrigger.tryEmit(query)
+        }
     }
 
     fun toggleFavorite(track: Track) {
