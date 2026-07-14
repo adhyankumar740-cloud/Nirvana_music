@@ -206,9 +206,14 @@ private fun JamRoomContent(jamViewModel: JamViewModel) {
     var textInput by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
+    // Also re-scroll when the typing indicator appears/disappears (it renders
+    // as an extra item below the last message) - previously only messages.size
+    // was watched, so the indicator popping in/out could shift what's visible
+    // without the list following it.
+    val typingIndicatorVisible = typingUids.isNotEmpty()
+    LaunchedEffect(messages.size, typingIndicatorVisible) {
+        if (messages.isNotEmpty() || typingIndicatorVisible) {
+            listState.animateScrollToItem((messages.size - 1 + if (typingIndicatorVisible) 1 else 0).coerceAtLeast(0))
         }
     }
 
@@ -337,7 +342,9 @@ private fun JamRoomContent(jamViewModel: JamViewModel) {
             val typingNames = typingUids.mapNotNull { uid -> participants.find { it.uid == uid }?.name }
             if (typingNames.isNotEmpty()) {
                 item {
-                    typingNames.forEach { name -> TypingIndicatorBubble(name = name) }
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        typingNames.forEach { name -> TypingIndicatorBubble(name = name) }
+                    }
                 }
             }
         }
