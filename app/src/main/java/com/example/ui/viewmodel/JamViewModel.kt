@@ -53,7 +53,9 @@ class JamViewModel(
 
     init {
         jamManager.onParticipantsChanged = { list -> _participants.value = list }
-        jamManager.onRemoteSongChange = { song -> musicPlayer.applyRemoteSongChange(song) }
+        jamManager.onRemoteSongChange = { song, positionMs, isPlaying, updatedAtServerMs ->
+            musicPlayer.applyRemoteSongChange(song, positionMs, isPlaying, updatedAtServerMs)
+        }
         jamManager.onRemotePlayPause = { isPlaying, positionMs -> musicPlayer.applyRemotePlayPause(isPlaying, positionMs) }
         jamManager.onRemoteSeek = { positionMs -> musicPlayer.applyRemoteSeek(positionMs) }
         jamManager.onLog = { msg -> _uiState.value = _uiState.value.copy(errorMessage = msg) }
