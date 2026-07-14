@@ -46,6 +46,20 @@ class MusicPlayer(
 
     private var isApplyingRemote = false
     private var suppressNextPlayPauseBroadcast = false
+    // JAM SYNC FIX: isApplyingRemote is set true/false SYNCHRONOUSLY around play()/seekTo()
+    // calls, but the MediaController is IPC-backed - the actual onIsPlayingChanged /
+    // onPositionDiscontinuity callbacks (and, for song changes, the relay network
+    // resolve) land LATER, asynchronously, by which time isApplyingRemote has already
+    // flipped back to false. That race made a remote-applied change get re-broadcast
+    // as if it were a fresh local action, causing the other device to receive an echo
+    // and re-apply it - the ping-pong that showed up as sync delay / devices fighting
+    // each other / playback occasionally getting stuck. suppressNextPlayPauseBroadcast
+    // already solved this for applyRemotePlayPause; suppressNextSeekBroadcast does the
+    // same for seeks (applyRemoteSeek and the seekTo() inside applyRemotePlayPause),
+    // and applyRemoteSongChange now also arms suppressNextPlayPauseBroadcast so the
+    // *delayed* isPlayingChanged that fires once the relay resolve finishes is caught
+    // too, no matter how long that resolve takes.
+    private var suppressNextSeekBroadcast = false
 
     var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null
 
@@ -189,7 +203,11 @@ class MusicPlayer(
             if (reason == Player.DISCONTINUITY_REASON_SEEK) {
                 val targetSeekMs = newPosition.positionMs
                 _playbackPosition.value = targetSeekMs
-                if (!isApplyingRemote) onLocalSeek?.invoke(targetSeekMs)
+                if (suppressNextSeekBroadcast) {
+                    suppressNextSeekBroadcast = false
+                } else if (!isApplyingRemote) {
+                    onLocalSeek?.invoke(targetSeekMs)
+                }
             }
         }
 
@@ -639,6 +657,7 @@ class MusicPlayer(
     }
 
     fun seekTo(position: Long) {
+        if (isApplyingRemote) suppressNextSeekBroadcast = true
         runOnController { it.seekTo(position) }
         _playbackPosition.value = position
         if (!isApplyingRemote) onLocalSeek?.invoke(position)
@@ -646,6 +665,7 @@ class MusicPlayer(
 
     fun applyRemoteSongChange(song: Song) {
         isApplyingRemote = true
+        suppressNextPlayPauseBroadcast = true
         try {
             play(TrackSongBridge.toTrack(song))
         } finally {
