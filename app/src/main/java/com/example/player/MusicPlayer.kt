@@ -77,7 +77,17 @@ class MusicPlayer(
     // remote apply can only eat broadcasts for a few seconds, never indefinitely.
     private var suppressNextSeekBroadcast = false
     private var suppressSeekArmedAt = 0L
-    private val suppressExpiryMs = 8_000L
+    // TUNING FIX: this was 8s, but a cold-cache relay /resolve (RelayService's own
+    // readTimeout is 45s, and onPlayerError even retries once more after that) can
+    // legitimately take far longer than 8s. When a remote Jam song-change triggered
+    // a slow resolve, the suppress flag expired WHILE we were still waiting on the
+    // network - so the eventual onIsPlayingChanged(true)/seek, once the resolve
+    // finally landed, got broadcast back to Firebase as if it were a brand new local
+    // action. That produced an echo that could yank the position back to 0 / restart
+    // the track on every other device, and is a big part of why Jam felt like it
+    // never really settled after joining/switching songs. 60s comfortably covers the
+    // full resolve+one-retry window with room to spare.
+    private val suppressExpiryMs = 60_000L
 
     var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null
 
@@ -204,6 +214,15 @@ class MusicPlayer(
                 Player.STATE_READY -> {
                     _isBuffering.value = false
                     _duration.value = (mediaController?.duration ?: 0L).coerceAtLeast(0L)
+                    // BUG FIX: this was never set anywhere, so it was permanently
+                    // false for every track. That made handleTrackEnded() treat
+                    // EVERY normal, fully-played song as a "failure" and run it
+                    // through registerPlaybackFailureAndMaybeStop() - which halts
+                    // playback entirely after 3 songs in a row (even though all 3
+                    // played perfectly fine start to finish). In a Jam this made
+                    // one device randomly stop dead while the other kept going,
+                    // looking exactly like "song sirf ek device pe chalta hai".
+                    hasReachedPlayingState = true
                 }
                 Player.STATE_ENDED -> handleTrackEnded()
                 else -> {}
@@ -543,6 +562,7 @@ class MusicPlayer(
         _isBuffering.value = true
         _isPlaying.value = false
         _playbackPosition.value = 0L
+        hasReachedPlayingState = false
         
         runOnController { controller ->
             val metadata = MediaMetadata.Builder()
