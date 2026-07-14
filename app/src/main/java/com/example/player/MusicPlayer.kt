@@ -89,6 +89,51 @@ class MusicPlayer(
     // full resolve+one-retry window with room to spare.
     private val suppressExpiryMs = 60_000L
 
+    // SYNC-DRIFT FIX: the room's playback timing (position/isPlaying/server
+    // timestamp) at the moment a remote song change was received, captured by
+    // applyRemoteSongChange() and consumed once by playYoutubeTrack()/
+    // playItunesTrack() right after THIS device's own resolve/buffering finishes.
+    // Without this, every device just started a new track at 0:00 the instant its
+    // own (variable-length) relay resolve completed - a device whose resolve took
+    // even a few seconds longer than another's ended up permanently that far
+    // behind, with nothing ever correcting the drift afterward.
+    private data class RemoteCatchUp(val positionMs: Long, val isPlaying: Boolean, val updatedAtServerMs: Long)
+    private var pendingCatchUp: RemoteCatchUp? = null
+
+    /** Seeks to compensate for however long resolving THIS track took, without
+     *  broadcasting the seek back to Firebase (it's a local time-sync correction,
+     *  not a user/host action). Mirrors applyRemoteSeek()'s isApplyingRemote +
+     *  suppressNextSeekBroadcast pattern. */
+    private fun applyCatchUpSeek(positionMs: Long) {
+        isApplyingRemote = true
+        suppressNextSeekBroadcast = true
+        suppressSeekArmedAt = System.currentTimeMillis()
+        try {
+            seekTo(positionMs)
+        } finally {
+            isApplyingRemote = false
+        }
+    }
+
+    /** Computes the room's current position from a captured RemoteCatchUp (adding
+     *  elapsed real time on top if it was playing) and seeks to it, clamped to the
+     *  track's duration. Call once, right after playback has actually started for
+     *  the track this catch-up was captured for. */
+    private fun resolveAndApplyCatchUp(catchUp: RemoteCatchUp?, trackDurationMs: Long) {
+        if (catchUp == null) return
+        val target = if (catchUp.isPlaying) {
+            catchUp.positionMs + (System.currentTimeMillis() - catchUp.updatedAtServerMs).coerceAtLeast(0L)
+        } else {
+            catchUp.positionMs.coerceAtLeast(0L)
+        }
+        val clamped = if (trackDurationMs > 0) target.coerceIn(0L, (trackDurationMs - 500L).coerceAtLeast(0L)) else target
+        // Small gaps aren't worth a seek (barely audible, and avoids a pointless
+        // micro-stutter on the common case where resolves finish close together).
+        if (clamped > 700L) {
+            applyCatchUpSeek(clamped)
+        }
+    }
+
     var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null
 
     private val _currentTrack = MutableStateFlow<Track?>(null)
@@ -262,7 +307,7 @@ class MusicPlayer(
                     if (videoId != null && relayRetriedForVideoId != videoId) {
                         relayRetriedForVideoId = videoId
                         Log.e("MusicPlayer", "Relay audio playback error, retrying relay resolve once", error)
-                        retryRelayResolve(track, videoId)
+                        retryRelayResolve(track, videoId, catchUp = null)
                     } else {
                         Log.e("MusicPlayer", "Relay audio playback error again, giving up on this track", error)
                         _playbackError.value = "Yeh gaana stream nahi ho paya."
@@ -275,7 +320,7 @@ class MusicPlayer(
         }
     }
 
-    private fun retryRelayResolve(track: Track, videoId: String) {
+    private fun retryRelayResolve(track: Track, videoId: String, catchUp: RemoteCatchUp?) {
         scope.launch {
             try {
                 val response = withContext(Dispatchers.IO) {
@@ -299,6 +344,7 @@ class MusicPlayer(
                     controller.prepare()
                     controller.play()
                 }
+                resolveAndApplyCatchUp(catchUp, track.durationMs)
                 startProgressTracker()
             } catch (e: Exception) {
                 Log.e("MusicPlayer", "Relay retry failed for $videoId, giving up on this track", e)
@@ -563,7 +609,9 @@ class MusicPlayer(
         _isPlaying.value = false
         _playbackPosition.value = 0L
         hasReachedPlayingState = false
-        
+        val catchUp = pendingCatchUp
+        pendingCatchUp = null
+
         runOnController { controller ->
             val metadata = MediaMetadata.Builder()
                 .setTitle(track.title)
@@ -581,6 +629,7 @@ class MusicPlayer(
             controller.prepare()
             controller.play()
         }
+        resolveAndApplyCatchUp(catchUp, track.durationMs)
         startProgressTracker()
     }
 
@@ -596,6 +645,10 @@ class MusicPlayer(
         _duration.value = track.durationMs
         hasReachedPlayingState = false
         _playbackError.value = null
+        // Captured synchronously (not re-read later) so a different track started
+        // while THIS resolve is still in flight can't steal or corrupt this catch-up.
+        val catchUp = pendingCatchUp
+        pendingCatchUp = null
 
         val videoId = track.youtubeVideoId
         loadedYoutubeVideoId = videoId
@@ -640,6 +693,10 @@ class MusicPlayer(
                     controller.prepare()
                     controller.play()
                 }
+                // SYNC-DRIFT FIX: only now (once THIS device's resolve has actually
+                // finished) do we know how long it took - so only now can we correctly
+                // compute and apply the catch-up seek. See resolveAndApplyCatchUp().
+                resolveAndApplyCatchUp(catchUp, track.durationMs)
                 startProgressTracker()
                 startBufferingWatchdog(videoId)
             } catch (e: Exception) {
@@ -647,7 +704,7 @@ class MusicPlayer(
                 if (loadedYoutubeVideoId != videoId) return@launch
                 if (relayRetriedForVideoId != videoId) {
                     relayRetriedForVideoId = videoId
-                    retryRelayResolve(track, videoId)
+                    retryRelayResolve(track, videoId, catchUp)
                 } else {
                     _playbackError.value = "Yeh gaana stream nahi ho paya - relay se connect nahi ho saka."
                     registerPlaybackFailureAndMaybeStop()
@@ -707,10 +764,16 @@ class MusicPlayer(
         if (!isApplyingRemote) onLocalSeek?.invoke(position)
     }
 
-    fun applyRemoteSongChange(song: Song) {
+    fun applyRemoteSongChange(song: Song, positionMs: Long, isPlaying: Boolean, updatedAtServerMs: Long) {
         isApplyingRemote = true
         suppressNextPlayPauseBroadcast = true
         suppressPlayPauseArmedAt = System.currentTimeMillis()
+        // SYNC-DRIFT FIX: stash the room's timing state so that once THIS device's
+        // own relay resolve/buffering finishes (which can take a few seconds longer
+        // or shorter than any other device's), playYoutubeTrack()/playItunesTrack()
+        // can seek forward to compensate for exactly that gap instead of always
+        // starting at 0:00 - see applyCatchUpSeek().
+        pendingCatchUp = RemoteCatchUp(positionMs, isPlaying, updatedAtServerMs)
         try {
             play(TrackSongBridge.toTrack(song))
         } finally {
