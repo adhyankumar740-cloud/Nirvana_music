@@ -91,12 +91,21 @@ data class PlayHistoryEntity(
  * A user-created playlist. Tracks live in [PlaylistTrackEntity], keyed by
  * (playlistId, trackId) - so a playlist owns its own snapshot of each track's
  * fields and doesn't break if the track is later removed from Favorites/Downloads.
+ *
+ * [remoteId] is a stable, device-independent key (random UUID, generated once
+ * at creation) used purely for cloud backup/restore (see PlaylistCloudSync) -
+ * unlike [id] (Room's local autoIncrement key, which restarts from 1 on every
+ * fresh install and can't be trusted to mean "the same playlist" across
+ * devices), [remoteId] stays the same for a given playlist forever, so a
+ * restored playlist can be recognized as "already have this one" instead of
+ * being re-imported as a duplicate every time the app is reinstalled.
  */
 @Entity(tableName = "playlists")
 data class PlaylistEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val remoteId: String = java.util.UUID.randomUUID().toString()
 )
 
 /** One track inside one playlist. Composite key so a track can't be added twice to the same playlist. */
