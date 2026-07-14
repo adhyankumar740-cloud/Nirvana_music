@@ -71,8 +71,8 @@ class SamplesViewModel(
 
     /**
      * "Play Full Song" button - finds the best-matching YouTube video for this
-     * sample's title/artist and starts it in the app's own player (small,
-     * always-visible embedded YouTube view - see YouTubePlayerHost). No longer
+     * sample's title/artist and streams its audio directly through the app's
+     * own player (relay-resolved, via MusicPlayer/PlaybackService). No longer
      * launches the external YouTube app.
      */
     fun playFullSong(track: Track) {
