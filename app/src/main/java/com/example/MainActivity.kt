@@ -99,7 +99,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private val playlistViewModel: PlaylistViewModel by viewModels {
-        PlaylistViewModel.Factory(appContainer.musicRepository, appContainer.musicPlayer)
+        PlaylistViewModel.Factory(
+            appContainer.musicRepository,
+            appContainer.musicPlayer,
+            appContainer.playlistCloudSync,
+            authViewModel.email
+        )
     }
 
     // No-op either way: if denied, the foreground service/playback still runs,
