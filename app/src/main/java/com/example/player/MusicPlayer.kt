@@ -849,7 +849,19 @@ class MusicPlayer(
     fun applyRemoteSeek(positionMs: Long) {
         isApplyingRemote = true
         try {
-            seekTo(positionMs)
+            // DRIFT-CORRECTION FIX: this is now also called by Jam's periodic
+            // heartbeat (not just real user scrubs), so it fires every few seconds
+            // while a room is playing. Unconditionally seeking every time caused a
+            // tiny audible stutter on every heartbeat even when devices were already
+            // essentially in sync. A gap this small isn't perceptible, so only
+            // actually seek when the two devices have drifted far enough apart to
+            // matter - this is what keeps Jam feeling like "one device playing"
+            // instead of slowly sliding out of sync between corrections.
+            val currentPos = mediaController?.currentPosition ?: _playbackPosition.value
+            val driftMs = kotlin.math.abs(currentPos - positionMs)
+            if (driftMs > 700) {
+                seekTo(positionMs)
+            }
         } finally {
             isApplyingRemote = false
         }
