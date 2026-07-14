@@ -116,6 +116,25 @@ class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    // BUG FIX: unlike maybeRequestIgnoreBatteryOptimizations() below, this had no
+    // "already asked" flag at all - checkSelfPermission() stays DENIED for as long
+    // as the user doesn't explicitly grant it, so this dialog was popping up on
+    // literally every single app launch until the user granted it. Same one-time
+    // pattern as the battery-optimization prompt: ask once, remember the choice,
+    // never nag again (user can still flip it on manually from app settings).
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val prefs = getSharedPreferences("battery_opt_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("notification_prompt_shown", false)) return
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        prefs.edit().putBoolean("notification_prompt_shown", true).apply()
+    }
+
     // This is what actually keeps music playing in the background on
     // aggressive OEM ROMs (MIUI/Xiaomi, Vivo, Oppo, Realme, Asus, etc.) -
     // without this exemption, those manufacturers' battery managers kill the
@@ -151,13 +170,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-
+        maybeRequestNotificationPermission()
         maybeRequestIgnoreBatteryOptimizations()
 
         setContent {
