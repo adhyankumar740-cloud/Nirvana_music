@@ -14,7 +14,12 @@ import androidx.room.RoomDatabase
         PlaylistEntity::class,
         PlaylistTrackEntity::class
     ],
-    version = 4,
+    // v5: added PlaylistEntity.remoteId (stable UUID for cloud backup/restore,
+    // see PlaylistCloudSync) - fallbackToDestructiveMigration below means this
+    // is a clean recreate on upgrade, which is fine: local Room data here is
+    // just an on-device cache, and the whole point of this column is that the
+    // real backup now lives in the cloud instead.
+    version = 5,
     exportSchema = false
 )
 abstract class MusicDatabase : RoomDatabase() {
