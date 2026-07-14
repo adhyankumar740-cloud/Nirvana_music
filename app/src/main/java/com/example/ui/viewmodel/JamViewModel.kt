@@ -10,6 +10,8 @@ import com.example.jam.JamChatManager
 import com.example.jam.JamManager
 import com.example.player.MusicPlayer
 import com.google.firebase.auth.FirebaseAuth
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,6 +50,13 @@ class JamViewModel(
 
     private val _replyMessage = MutableStateFlow<ChatMessage?>(null)
     val replyMessage: StateFlow<ChatMessage?> = _replyMessage.asStateFlow()
+
+    // DRIFT-CORRECTION: periodically re-broadcasts the host's position while a
+    // room is playing (see startHeartbeat()) so devices don't slowly slide out
+    // of sync between real events (song change/play-pause/seek) - without this,
+    // the only thing keeping two devices aligned was whatever event last fired,
+    // and small decoder/network timing differences would accumulate in between.
+    private var heartbeatJob: Job? = null
 
     val myUid: String? get() = FirebaseAuth.getInstance().currentUser?.uid
 
@@ -103,6 +112,7 @@ class JamViewModel(
                 )
                 jamChatManager.attach(code)
                 _uiState.value = JamUiState(roomCode = code, isHost = true, isInRoom = true)
+                startHeartbeat()
             } catch (e: Exception) {
                 _uiState.value = JamUiState(errorMessage = e.message ?: "Failed to create Jam room")
             }
@@ -118,6 +128,7 @@ class JamViewModel(
                     val roomCode = jamManager.roomCode!!
                     jamChatManager.attach(roomCode)
                     _uiState.value = JamUiState(roomCode = roomCode, isHost = false, isInRoom = true)
+                    startHeartbeat()
                 } else {
                     _uiState.value = JamUiState(errorMessage = "Room not found. Double-check the code and try again.")
                 }
@@ -128,12 +139,36 @@ class JamViewModel(
     }
 
     fun leaveRoom() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         jamManager.leaveRoom()
         jamChatManager.detach()
         _messages.value = emptyList()
         _participants.value = emptyList()
         _typingUsers.value = emptySet()
         _uiState.value = JamUiState()
+    }
+
+    /**
+     * Every few seconds while the room is playing, the HOST re-broadcasts its
+     * current position (reusing the same playback/positionMs write a manual seek
+     * uses). Only the host does this - not every device - so two devices never
+     * "fight" over whose clock is correct; everyone else just gently corrects
+     * toward the host's position (and only if the drift is actually big enough
+     * to matter - see MusicPlayer.applyRemoteSeek). This is what keeps Jam
+     * feeling like one device playing instead of slowly drifting apart between
+     * real events (song change/play-pause/manual seek).
+     */
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = viewModelScope.launch {
+            while (true) {
+                delay(4000)
+                if (jamManager.roomCode != null && jamManager.isHost && musicPlayer.isPlaying.value) {
+                    jamManager.pushSeek(musicPlayer.playbackPosition.value)
+                }
+            }
+        }
     }
 
     fun dismissError() {
@@ -178,6 +213,7 @@ class JamViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        heartbeatJob?.cancel()
         jamManager.leaveRoom()
         jamChatManager.detach()
     }
