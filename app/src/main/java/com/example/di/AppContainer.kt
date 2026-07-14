@@ -9,6 +9,7 @@ import com.example.data.network.ITunesService
 import com.example.data.network.LrcLibService
 import com.example.data.network.RelayService
 import com.example.data.repository.MusicRepository
+import com.example.data.sync.PlaylistCloudSync
 import com.example.jam.JamChatManager
 import com.example.jam.JamManager
 import com.example.player.MusicPlayer
@@ -66,6 +67,13 @@ class AppContainer(private val context: Context) {
 
     val jamChatManager: JamChatManager by lazy {
         JamChatManager()
+    }
+
+    // Backs playlists up to Firebase Realtime Database, keyed by the logged-in
+    // account's email, so "delete the app -> log back in" restores them - see
+    // PlaylistCloudSync's own doc comment for how the restore merge works.
+    val playlistCloudSync: PlaylistCloudSync by lazy {
+        PlaylistCloudSync()
     }
 
     val musicPlayer: MusicPlayer by lazy {
