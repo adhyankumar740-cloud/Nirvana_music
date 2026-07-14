@@ -2,13 +2,9 @@ package com.example
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -135,43 +131,19 @@ class MainActivity : ComponentActivity() {
         prefs.edit().putBoolean("notification_prompt_shown", true).apply()
     }
 
-    // This is what actually keeps music playing in the background on
-    // aggressive OEM ROMs (MIUI/Xiaomi, Vivo, Oppo, Realme, Asus, etc.) -
-    // without this exemption, those manufacturers' battery managers kill the
-    // playback process even though it's a correctly-declared foreground
-    // service. It's a one-time system dialog, so we only ever ask once
-    // (tracked in prefs) - if the user declines, we don't nag them every launch.
-    private val batteryOptimizationLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
-
-    private fun maybeRequestIgnoreBatteryOptimizations() {
-        val prefs = getSharedPreferences("battery_opt_prefs", Context.MODE_PRIVATE)
-        if (prefs.getBoolean("prompt_shown", false)) return
-
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
-            try {
-                batteryOptimizationLauncher.launch(
-                    Intent(
-                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:$packageName")
-                    )
-                )
-            } catch (e: Exception) {
-                // Some OEM builds strip this action out of Settings entirely -
-                // fail silently rather than crash; the user can still enable
-                // it manually from the app's battery settings.
-            }
-        }
-        prefs.edit().putBoolean("prompt_shown", true).apply()
-    }
+    // Battery-optimization exemption prompt removed - in practice almost no
+    // user granted this dialog (it looked like a scary/unnecessary permission
+    // right on install), so we stopped asking for it entirely. The foreground
+    // media-playback service still keeps audio going in the background on
+    // stock Android; only some aggressive OEM ROMs (MIUI/Xiaomi, Vivo, Oppo,
+    // etc.) may kill it a bit more eagerly without this exemption - that's the
+    // accepted tradeoff for not showing this prompt at all.
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         maybeRequestNotificationPermission()
-        maybeRequestIgnoreBatteryOptimizations()
 
         setContent {
             MyApplicationTheme {
