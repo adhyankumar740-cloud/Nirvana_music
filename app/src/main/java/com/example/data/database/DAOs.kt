@@ -106,8 +106,16 @@ interface PlaylistDao {
     @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
     fun getAllPlaylists(): Flow<List<PlaylistEntity>>
 
+    // One-shot (non-Flow) read used by PlaylistCloudSync to diff local vs
+    // cloud playlists on login/restore, without keeping a live collector open.
+    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    suspend fun getAllPlaylistsOnce(): List<PlaylistEntity>
+
     @Query("SELECT * FROM playlists WHERE id = :id LIMIT 1")
     suspend fun getPlaylistById(id: Long): PlaylistEntity?
+
+    @Query("SELECT * FROM playlists WHERE remoteId = :remoteId LIMIT 1")
+    suspend fun getPlaylistByRemoteId(remoteId: String): PlaylistEntity?
 
     @Query("UPDATE playlists SET name = :name WHERE id = :id")
     suspend fun renamePlaylist(id: Long, name: String)
@@ -120,6 +128,11 @@ interface PlaylistDao {
 
     @Query("SELECT * FROM playlist_tracks WHERE playlistId = :playlistId ORDER BY addedAt ASC")
     fun getTracksForPlaylist(playlistId: Long): Flow<List<PlaylistTrackEntity>>
+
+    // One-shot variant used by PlaylistCloudSync when uploading/restoring
+    // (doesn't need a live subscription, just a snapshot at sync time).
+    @Query("SELECT * FROM playlist_tracks WHERE playlistId = :playlistId ORDER BY addedAt ASC")
+    suspend fun getTracksForPlaylistOnce(playlistId: Long): List<PlaylistTrackEntity>
 
     @Query("SELECT EXISTS(SELECT 1 FROM playlist_tracks WHERE playlistId = :playlistId AND trackId = :trackId)")
     suspend fun isTrackInPlaylist(playlistId: Long, trackId: Long): Boolean
