@@ -2,10 +2,14 @@ package com.example.player
 
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.example.data.model.Song
@@ -112,6 +116,13 @@ class MusicPlayer(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 5
     }
     private var preloadJob: Job? = null
+
+    // Jab tak preloadJob URL resolve karke iske actual audio bytes disk cache
+    // me utaar raha hota hai, uska CacheWriter yahan rakha jaata hai - taaki
+    // agar is beech me prediction badal jaaye (user shuffle/skip kar de,
+    // naya "next" track ban jaaye) to hum turant isko cancel() karke bandwidth
+    // naye sahi target pe laga sakein, purane par waste na ho.
+    private var activeCacheWriter: CacheWriter? = null
 
     private var progressJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Main + Job())
@@ -431,23 +442,58 @@ class MusicPlayer(
         }
     }
 
+    // Do kaam ek ke baad ek, current track chalte-chalte background me:
+    //  1) Agle track ka relay stream URL resolve karo (jaisa pehle hota tha)
+    //  2) URL milte hi, USSI TIME uske asli audio chunks disk cache me utaarna
+    //     shuru kar do (CacheWriter se) - "chunks jama karna", ExoPlayer ke
+    //     asli play hone se pehle hi.
+    // Isse buffering sirf pehli baar hoti hai: jab track 2 par switch hota
+    // hai, uske bytes pehle se cache me mil jaate hai (PlaybackService ka
+    // ExoPlayer isi shared PlaybackCache se padhta hai), aur play() ke end
+    // me yeh function dobara call hoke turant track 3 ke chunks jama karna
+    // shuru kar deta hai - is tarah har baar sirf agle ek gaane ka hi
+    // prefetch chalta hai, kabhi bhi ek se zyada cheezein ek saath download
+    // nahi hoti.
     private fun preloadNextTrack() {
         preloadJob?.cancel()
+        activeCacheWriter?.cancel()
+        activeCacheWriter = null
+
         val next = peekNextTrack() ?: return
         if (next.source != TrackSource.YOUTUBE) return
         val videoId = next.youtubeVideoId ?: return
-        if (preloadedStreamUrls.containsKey(videoId)) return
+
         preloadJob = scope.launch {
             try {
-                val response = withContext(Dispatchers.IO) {
-                    relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                val streamUrl = preloadedStreamUrls[videoId] ?: run {
+                    val response = withContext(Dispatchers.IO) {
+                        relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                    }
+                    preloadedStreamUrls[videoId] = response.stream_url
+                    response.stream_url
                 }
-                preloadedStreamUrls[videoId] = response.stream_url
+
+                withContext(Dispatchers.IO) {
+                    val dataSource =
+                        PlaybackCache.cacheDataSourceFactory(context).createDataSource() as CacheDataSource
+                    val cacheWriter = CacheWriter(
+                        dataSource,
+                        DataSpec(Uri.parse(streamUrl)),
+                        /* temporaryBuffer = */ null,
+                        /* progressListener = */ null
+                    )
+                    activeCacheWriter = cacheWriter
+                    cacheWriter.cache()
+                }
             } catch (e: Exception) {
-                // Best-effort prefetch only - if it fails, playYoutubeTrack()
-                // will just resolve it fresh (with its own retry-once logic)
-                // when this track is actually reached, same as before.
-                Log.w("MusicPlayer", "Prefetch resolve failed for $videoId", e)
+                // Best-effort prefetch/pre-cache only - agar yeh fail ho jaaye
+                // (relay down, cache full, ya prediction badalne se cancel ho
+                // gaya) to playYoutubeTrack() apna normal resolve+play flow
+                // chalayega jaise pehle hota tha, bas ek extra buffering ke
+                // saath jo warna avoid ho jaati.
+                Log.w("MusicPlayer", "Next-track prefetch/pre-cache failed or cancelled for $videoId", e)
+            } finally {
+                activeCacheWriter = null
             }
         }
     }
@@ -648,6 +694,8 @@ class MusicPlayer(
         stopProgressTracker()
         cancelBufferingWatchdog()
         preloadJob?.cancel()
+        activeCacheWriter?.cancel()
+        activeCacheWriter = null
         preloadedStreamUrls.clear()
         mediaController?.release()
         mediaController = null
