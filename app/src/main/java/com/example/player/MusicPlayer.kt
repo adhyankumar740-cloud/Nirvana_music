@@ -205,6 +205,32 @@ class MusicPlayer(
     }
     private var preloadJob: Job? = null
 
+    // AUTOPLAY-GAP FIX (root cause of "song khatam hone ke baad next song
+    // bajne me 10-15 sec lagta hai"): preloadNextTrack() below only pre-
+    // resolves+pre-caches a track that's already IN the queue (peekNextTrack()
+    // returns non-null). The moment the queue actually runs out and playback
+    // has to fall back to autoplayProvider (recommendations), peekNextTrack()
+    // returns null on purpose (see its own comment) - so nothing was ever
+    // preloaded for that transition, and triggerAutoplay() paid the FULL cost
+    // (recommendation lookup + a cold relay /resolve, which the preload
+    // comment above already notes can be slow) only AFTER the track had
+    // already ended. For an app that's mostly played by "let it keep going"
+    // rather than a long manually-built queue, that's the transition that
+    // happens on almost every song - hence a consistent 10-15s gap every time,
+    // not just once at the end of a playlist.
+    // Fix: whenever peekNextTrack() has nothing, speculatively call the same
+    // autoplayProvider early (while the current track is still playing) and
+    // pre-resolve/pre-cache whatever it returns, exactly like a normal queued
+    // next-track. triggerAutoplay() then reuses this candidate instead of
+    // hitting the provider/relay cold.
+    private var autoplayPreloadJob: Job? = null
+    private var pendingAutoplayTrack: Track? = null
+    // Guards against staleness: only valid for a candidate computed against
+    // the track that's STILL playing when triggerAutoplay() actually runs -
+    // if the user skipped/changed tracks in between, this candidate no longer
+    // reflects "what should play after the current track".
+    private var pendingAutoplaySourceTrackId: Long? = null
+
     // Jab tak preloadJob URL resolve karke iske actual audio bytes disk cache
     // me utaar raha hota hai, uska CacheWriter yahan rakha jaata hai - taaki
     // agar is beech me prediction badal jaaye (user shuffle/skip kar de,
@@ -535,12 +561,22 @@ class MusicPlayer(
     private fun triggerAutoplay() {
         val current = _currentTrack.value ?: return
         val provider = autoplayProvider ?: return
+        // AUTOPLAY-GAP FIX: if preloadAutoplayCandidate() already resolved
+        // (and pre-cached) a recommendation for THIS track while it was still
+        // playing, use it directly - this is what actually removes the
+        // 10-15s gap, since neither the recommendation lookup nor the relay
+        // resolve have to happen again down in play()/playYoutubeTrack().
+        val preloadedCandidate = pendingAutoplayTrack.takeIf { pendingAutoplaySourceTrackId == current.id }
+        pendingAutoplayTrack = null
+        pendingAutoplaySourceTrackId = null
         scope.launch {
             _isResolvingAutoplay.value = true
             try {
-                val excludeIds = (_queue.value.map { it.id } + recentlyPlayedIds).toSet()
-                val recentTracks = _queue.value + recentlyPlayedTracks
-                val next = provider(current, excludeIds, recentTracks)
+                val next = preloadedCandidate ?: run {
+                    val excludeIds = (_queue.value.map { it.id } + recentlyPlayedIds).toSet()
+                    val recentTracks = _queue.value + recentlyPlayedTracks
+                    provider(current, excludeIds, recentTracks)
+                }
                 if (next != null) {
                     _queue.value = _queue.value + next
                     val newIndex = _queue.value.size - 1
@@ -643,8 +679,18 @@ class MusicPlayer(
         preloadJob?.cancel()
         activeCacheWriter?.cancel()
         activeCacheWriter = null
+        autoplayPreloadJob?.cancel()
+        pendingAutoplayTrack = null
+        pendingAutoplaySourceTrackId = null
 
-        val next = peekNextTrack() ?: return
+        val next = peekNextTrack()
+        if (next == null) {
+            // Nothing queued to play next - this is exactly the case that
+            // used to fall through with no preloading at all. See the
+            // AUTOPLAY-GAP FIX comment above pendingAutoplayTrack.
+            preloadAutoplayCandidate()
+            return
+        }
         if (next.source != TrackSource.YOUTUBE) return
         val videoId = next.youtubeVideoId ?: return
 
@@ -677,6 +723,62 @@ class MusicPlayer(
                 // chalayega jaise pehle hota tha, bas ek extra buffering ke
                 // saath jo warna avoid ho jaati.
                 Log.w("MusicPlayer", "Next-track prefetch/pre-cache failed or cancelled for $videoId", e)
+            } finally {
+                activeCacheWriter = null
+            }
+        }
+    }
+
+    // Speculative version of preloadNextTrack() for when the queue is about
+    // to run out. Asks autoplayProvider EARLY (while the current track is
+    // still playing, well before STATE_ENDED) so the recommendation lookup
+    // and relay resolve both happen in the background with time to spare,
+    // instead of after the track has already finished. triggerAutoplay()
+    // picks this up via pendingAutoplayTrack instead of calling the provider
+    // again from scratch.
+    private fun preloadAutoplayCandidate() {
+        val current = _currentTrack.value ?: return
+        val provider = autoplayProvider ?: return
+        val sourceId = current.id
+
+        autoplayPreloadJob = scope.launch {
+            try {
+                val excludeIds = (_queue.value.map { it.id } + recentlyPlayedIds).toSet()
+                val recentTracks = _queue.value + recentlyPlayedTracks
+                val next = provider(current, excludeIds, recentTracks) ?: return@launch
+                // Stale if the currently playing track changed while this was
+                // in flight (user skipped/picked something else meanwhile).
+                if (_currentTrack.value?.id != sourceId) return@launch
+                pendingAutoplayTrack = next
+                pendingAutoplaySourceTrackId = sourceId
+
+                if (next.source != TrackSource.YOUTUBE) return@launch
+                val videoId = next.youtubeVideoId ?: return@launch
+                val streamUrl = preloadedStreamUrls[videoId] ?: run {
+                    val response = withContext(Dispatchers.IO) {
+                        relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                    }
+                    preloadedStreamUrls[videoId] = response.stream_url
+                    response.stream_url
+                }
+
+                withContext(Dispatchers.IO) {
+                    val dataSource =
+                        PlaybackCache.cacheDataSourceFactory(context).createDataSource() as CacheDataSource
+                    val cacheWriter = CacheWriter(
+                        dataSource,
+                        DataSpec(Uri.parse(streamUrl)),
+                        /* temporaryBuffer = */ null,
+                        /* progressListener = */ null
+                    )
+                    activeCacheWriter = cacheWriter
+                    cacheWriter.cache()
+                }
+            } catch (e: Exception) {
+                // Best-effort only - if this fails (provider error, relay down,
+                // cancelled because the prediction changed), triggerAutoplay()
+                // just falls back to its normal cold-start flow below.
+                Log.w("MusicPlayer", "Autoplay-candidate prefetch/pre-cache failed or cancelled", e)
             } finally {
                 activeCacheWriter = null
             }
@@ -951,6 +1053,9 @@ class MusicPlayer(
         releaseTransitionWakeLock()
         cancelBufferingWatchdog()
         preloadJob?.cancel()
+        autoplayPreloadJob?.cancel()
+        pendingAutoplayTrack = null
+        pendingAutoplaySourceTrackId = null
         activeCacheWriter?.cancel()
         activeCacheWriter = null
         preloadedStreamUrls.clear()
