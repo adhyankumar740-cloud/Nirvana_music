@@ -3,6 +3,7 @@ package com.example.player
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -19,11 +20,19 @@ class PlaybackService : MediaSessionService() {
     // ExoPlayer yahan hamesha ek hi media item ke saath kaam karta hai (poori
     // playlist load nahi hoti, agla/pichla track queue+autoplay logic se app
     // ke andar decide hota hai), isliye iske apne timeline mein kabhi "next"
-    // nahi hota - system control center is wajah se Next button hide/disable
-    // kar deta tha. Yeh callback next/previous ko hamesha available dikhata
-    // hai aur press hone par real logic (MusicPlayer.skipNext/skipPrevious)
-    // ko call karta hai, default ExoPlayer seek-to-next/previous behaviour ko
-    // chalne diye bina.
+    // item nahi hota.
+    //
+    // NOTE: MediaSession.Callback.onConnect() mein availableCommands add karna
+    // (neeche) sirf ek per-controller PERMISSION hai - woh asli ExoPlayer ke
+    // "kya next hai" wale internal answer ko badalta nahi hai. System ka media
+    // notification/quick-settings widget seedha real Player object
+    // (yahan `player`, ForwardingPlayer wrap se pehle) ke getAvailableCommands()
+    // se check karta hai ki Next button dikhana hai ya nahi - aur single-item
+    // ExoPlayer hamesha COMMAND_SEEK_TO_NEXT ko false bolta hai, isliye button
+    // hi gayab ho jaata tha (screenshot: sirf Previous dikh raha tha).
+    // Fix `sessionPlayer` (neeche) mein hai - MediaSession ko raw `player`
+    // nahi, uska ForwardingPlayer wrapper diya jaata hai jo Next/Previous ko
+    // hamesha available bolta hai.
     private val sessionCallback = object : MediaSession.Callback {
         override fun onConnect(
             session: MediaSession,
@@ -105,9 +114,60 @@ class PlaybackService : MediaSessionService() {
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
 
-        mediaSession = MediaSession.Builder(this, player)
+        mediaSession = MediaSession.Builder(this, sessionPlayer(player))
             .setCallback(sessionCallback)
             .build()
+    }
+
+    // Real `player` (ExoPlayer) ko seedha session ko dene ke bajaye, iska yeh
+    // wrapper diya jaata hai - taaki system media notification/quick-settings
+    // widget hamesha Next/Previous button dikhaye (getAvailableCommands()),
+    // aur agar koi controller seekToNext()/seekToNextMediaItem() seedha player
+    // par bhi call kar de (sessionCallback.onPlayerCommandRequest() ko bypass
+    // karke), tab bhi woh humari asli skipNext/skipPrevious logic (queue +
+    // autoplay) tak hi pahunche, ExoPlayer ke khud ke (non-existent) internal
+    // "next item" tak nahi.
+    private fun sessionPlayer(exoPlayer: ExoPlayer): Player {
+        return object : ForwardingPlayer(exoPlayer) {
+            override fun isCommandAvailable(command: Int): Boolean {
+                return when (command) {
+                    Player.COMMAND_SEEK_TO_NEXT,
+                    Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+                    Player.COMMAND_SEEK_TO_PREVIOUS,
+                    Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> true
+                    else -> super.isCommandAvailable(command)
+                }
+            }
+
+            override fun getAvailableCommands(): Player.Commands {
+                return super.getAvailableCommands().buildUpon()
+                    .add(Player.COMMAND_SEEK_TO_NEXT)
+                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                    .build()
+            }
+
+            override fun hasNextMediaItem(): Boolean = true
+
+            override fun hasPreviousMediaItem(): Boolean = true
+
+            override fun seekToNext() {
+                PlaybackBridge.onNext?.invoke()
+            }
+
+            override fun seekToNextMediaItem() {
+                PlaybackBridge.onNext?.invoke()
+            }
+
+            override fun seekToPrevious() {
+                PlaybackBridge.onPrevious?.invoke()
+            }
+
+            override fun seekToPreviousMediaItem() {
+                PlaybackBridge.onPrevious?.invoke()
+            }
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
