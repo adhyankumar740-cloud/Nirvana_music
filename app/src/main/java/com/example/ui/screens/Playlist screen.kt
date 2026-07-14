@@ -27,11 +27,13 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -381,14 +383,27 @@ private fun PlaylistDetailView(
         Spacer(modifier = Modifier.height(12.dp))
 
         if (tracks.isNotEmpty()) {
-            Button(
-                onClick = { playlistViewModel.playPlaylist(tracks) },
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Play All", color = Color.Black, fontWeight = FontWeight.Bold)
+                Button(
+                    onClick = { playlistViewModel.playPlaylist(tracks) },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Play All", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+                OutlinedButton(
+                    onClick = { playlistViewModel.shufflePlayPlaylist(tracks) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Shuffle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Shuffle", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                }
             }
             Spacer(modifier = Modifier.height(16.dp))
         }
