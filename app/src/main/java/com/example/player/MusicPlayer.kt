@@ -27,13 +27,6 @@ import kotlinx.coroutines.withContext
 
 enum class RepeatMode { OFF, ONE, ALL }
 
-interface YouTubePlayerBridge {
-    fun loadVideo(videoId: String)
-    fun play()
-    fun pause()
-    fun seekTo(seconds: Float)
-}
-
 class MusicPlayer(
     private val context: Context,
     private val relayService: RelayService,
@@ -49,8 +42,6 @@ class MusicPlayer(
 
     private var isApplyingRemote = false
     private var suppressNextPlayPauseBroadcast = false
-
-    var youtubeBridge: YouTubePlayerBridge? = null
 
     var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null
 
@@ -101,14 +92,10 @@ class MusicPlayer(
     private var loadedYoutubeVideoId: String? = null
 
     // Ek hi videoId ke liye relay resolve sirf ek baar retry hota hai
-    // (mid-playback error pe) - taaki relay baar-baar down hone par hum WebView
-    // fallback pe atak na jayein, lekin infinite retry loop bhi na bane.
+    // (mid-playback error pe) - taaki relay baar-baar down hone par hum
+    // infinite retry loop me na phasein; ek retry ke baad bhi fail ho to
+    // track ko skip/error kar dete hain.
     private var relayRetriedForVideoId: String? = null
-
-    // True jab current YOUTUBE-source track BrokenX relay se resolve hui real
-    // audio URL se ExoPlayer ke through baj raha hai (PRIMARY). False = purana
-    // WebView/IFrame fallback (SECONDARY) use ho raha hai.
-    private var isRelayAudio = false
 
     private var bufferingWatchdogJob: Job? = null
     private val bufferingTimeoutMs = 12_000L
@@ -158,10 +145,6 @@ class MusicPlayer(
             _isPlaying.value = isPlayingNow
             if (isPlayingNow) startProgressTracker() else stopProgressTracker()
 
-            if (_currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-                if (isPlayingNow) youtubeBridge?.play() else youtubeBridge?.pause()
-            }
-
             if (suppressNextPlayPauseBroadcast) {
                 suppressNextPlayPauseBroadcast = false
             } else {
@@ -170,12 +153,8 @@ class MusicPlayer(
         }
 
         override fun onPlaybackStateChanged(state: Int) {
-            // ExoPlayer state seedha reflect hoti hai jab track ITUNES ho ya
-            // relay-resolved audio bajj raha ho - dono me ExoPlayer hi asli
-            // source hai. WebView fallback ke case me state bridge callbacks
-            // (onYoutubePlayerStateChanged) se aati hai, isliye yahan skip.
-            val exoDrivesStateNatively = _currentTrack.value?.source == TrackSource.ITUNES || isRelayAudio
-            if (!exoDrivesStateNatively) return
+            // ExoPlayer ab hamesha asli source hai (ITUNES preview ya relay-
+            // resolved YouTube audio), isliye state seedha reflect hoti hai.
             when (state) {
                 Player.STATE_BUFFERING -> _isBuffering.value = true
                 Player.STATE_READY -> {
@@ -192,46 +171,49 @@ class MusicPlayer(
             newPosition: Player.PositionInfo,
             reason: Int
         ) {
-            if (reason == Player.DISCONTINUITY_REASON_SEEK && _currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
+            // Lock-screen/notification seek bar drag hone par yeh fire hota hai
+            // (system seek seedha MediaSession ke player pe hoti hai, MusicPlayer
+            // ke apne seekTo() se hoke nahi) - isliye yahan se local state aur
+            // remote (Jam) listeners ko sync karna zaroori hai.
+            if (reason == Player.DISCONTINUITY_REASON_SEEK) {
                 val targetSeekMs = newPosition.positionMs
                 _playbackPosition.value = targetSeekMs
-                youtubeBridge?.seekTo(targetSeekMs / 1000f)
                 if (!isApplyingRemote) onLocalSeek?.invoke(targetSeekMs)
             }
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
             val track = _currentTrack.value ?: return
-            if (isRelayAudio && track.source == TrackSource.YOUTUBE) {
-                val videoId = track.youtubeVideoId
-                // WebView fallback background me unreliable hai (WebView JS
-                // suspend ho sakta hai jab app background me ho), isliye usse
-                // bachne ke liye ek baar relay ko fresh URL ke saath phir try
-                // karte hain (aksar error expired/one-time signed url ki wajah
-                // se hoti hai, poore video ke unavailable hone ki wajah se
-                // nahi) - sirf isi videoId ke liye ek hi baar, taaki loop na bane.
-                if (videoId != null && relayRetriedForVideoId != videoId) {
-                    relayRetriedForVideoId = videoId
-                    Log.e("MusicPlayer", "Relay audio playback error, retrying relay resolve once", error)
-                    retryRelayThenFallback(track, videoId)
-                } else {
-                    Log.e("MusicPlayer", "Relay audio playback error again, falling back to YouTube WebView", error)
-                    playYoutubeViaWebViewFallback(track)
+            when (track.source) {
+                TrackSource.YOUTUBE -> {
+                    val videoId = track.youtubeVideoId
+                    // Ek hi videoId ke liye ek baar relay ko fresh URL ke saath
+                    // phir try karte hain (aksar error expired/one-time signed
+                    // url ki wajah se hoti hai, poore video ke unavailable hone
+                    // ki wajah se nahi) - dusri baar fail hone par track skip.
+                    if (videoId != null && relayRetriedForVideoId != videoId) {
+                        relayRetriedForVideoId = videoId
+                        Log.e("MusicPlayer", "Relay audio playback error, retrying relay resolve once", error)
+                        retryRelayResolve(track, videoId)
+                    } else {
+                        Log.e("MusicPlayer", "Relay audio playback error again, giving up on this track", error)
+                        _playbackError.value = "Yeh gaana stream nahi ho paya."
+                        registerPlaybackFailureAndMaybeStop()
+                    }
                 }
-            } else if (track.source == TrackSource.ITUNES) {
-                registerPlaybackFailureAndMaybeStop()
+                TrackSource.ITUNES -> registerPlaybackFailureAndMaybeStop()
+                else -> {}
             }
         }
     }
 
-    private fun retryRelayThenFallback(track: Track, videoId: String) {
+    private fun retryRelayResolve(track: Track, videoId: String) {
         scope.launch {
             try {
                 val response = withContext(Dispatchers.IO) {
                     relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
                 }
                 if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
-                isRelayAudio = true
                 runOnController { controller ->
                     val metadata = MediaMetadata.Builder()
                         .setTitle(track.title)
@@ -251,9 +233,10 @@ class MusicPlayer(
                 }
                 startProgressTracker()
             } catch (e: Exception) {
-                Log.e("MusicPlayer", "Relay retry failed for $videoId, falling back to YouTube WebView", e)
+                Log.e("MusicPlayer", "Relay retry failed for $videoId, giving up on this track", e)
                 if (loadedYoutubeVideoId != videoId) return@launch
-                playYoutubeViaWebViewFallback(track)
+                _playbackError.value = "Yeh gaana stream nahi ho paya - relay se connect nahi ho saka."
+                registerPlaybackFailureAndMaybeStop()
             }
         }
     }
@@ -462,7 +445,7 @@ class MusicPlayer(
                 preloadedStreamUrls[videoId] = response.stream_url
             } catch (e: Exception) {
                 // Best-effort prefetch only - if it fails, playYoutubeTrack()
-                // will just resolve it fresh (with its own WebView fallback)
+                // will just resolve it fresh (with its own retry-once logic)
                 // when this track is actually reached, same as before.
                 Log.w("MusicPlayer", "Prefetch resolve failed for $videoId", e)
             }
@@ -470,10 +453,7 @@ class MusicPlayer(
     }
 
     private fun playItunesTrack(track: Track) {
-        isRelayAudio = false
-        PlaybackBridge.virtualModeActive = false
         cancelBufferingWatchdog()
-        youtubeBridge?.pause()
         _currentTrack.value = track
         if (!isApplyingRemote) onLocalSongChange?.invoke(track)
         _isBuffering.value = true
@@ -492,7 +472,7 @@ class MusicPlayer(
                 .setMediaMetadata(metadata)
                 .build()
 
-            controller.repeatMode = Player.REPEAT_MODE_OFF // silent-audio fallback repeat na reh jaye
+            controller.repeatMode = Player.REPEAT_MODE_OFF
             controller.setMediaItem(mediaItem)
             controller.prepare()
             controller.play()
@@ -501,15 +481,8 @@ class MusicPlayer(
     }
 
     private fun playYoutubeTrack(track: Track) {
-        isRelayAudio = false
-        PlaybackBridge.virtualModeActive = false // fresh track: relay ko pehle try karo real ExoPlayer audio ke saath
         relayRetriedForVideoId = null
         cancelBufferingWatchdog()
-        // FIX: agar pichla gaana WebView fallback se baj raha tha, use yahan pause
-        // na karne se woh background me chalta hi rehta tha - jab naya gaana relay se
-        // seedha ExoPlayer pe start hota, dono gaane ek saath baj jate the, aur dono
-        // ke network calls saath chalne se buffering bhi bahut kharab ho jati thi.
-        youtubeBridge?.pause()
         _currentTrack.value = track
         if (!isApplyingRemote) onLocalSongChange?.invoke(track)
 
@@ -527,10 +500,10 @@ class MusicPlayer(
             return
         }
 
-        // PRIMARY: BrokenX relay (Revo-music /resolve) se ek real audio stream
-        // url resolve karke seedha ExoPlayer se bajao - WebView/IFrame bilkul
-        // touch nahi hota. Fail hone par (relay down, timeout, 401/502 etc.)
-        // SECONDARY/fallback WebView tareeka use hota hai.
+        // Relay (Revo-music /resolve) se ek real audio stream url resolve
+        // karke seedha ExoPlayer se bajao. Fail hone par (relay down, timeout,
+        // 401/502 etc.) playerListener.onPlayerError ek baar retry karta hai,
+        // uske baad bhi fail ho to track skip/error ho jata hai.
         // FIX: if preloadNextTrack() already resolved this videoId while the
         // previous track was playing, use that cached URL immediately instead
         // of making the caller wait on a fresh (potentially slow) relay call -
@@ -546,7 +519,6 @@ class MusicPlayer(
                     }
                 }
                 if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
-                isRelayAudio = true
                 runOnController { controller ->
                     val metadata = MediaMetadata.Builder()
                         .setTitle(track.title)
@@ -559,72 +531,25 @@ class MusicPlayer(
                         .setMediaMetadata(metadata)
                         .build()
 
-                    controller.repeatMode = Player.REPEAT_MODE_OFF // silent-audio fallback repeat na reh jaye
+                    controller.repeatMode = Player.REPEAT_MODE_OFF
                     controller.setMediaItem(mediaItem)
                     controller.prepare()
                     controller.play()
                 }
                 startProgressTracker()
+                startBufferingWatchdog(videoId)
             } catch (e: Exception) {
-                Log.e("MusicPlayer", "Relay resolve failed for $videoId, falling back to YouTube WebView", e)
+                Log.e("MusicPlayer", "Relay resolve failed for $videoId, retrying once", e)
                 if (loadedYoutubeVideoId != videoId) return@launch
-                playYoutubeViaWebViewFallback(track)
+                if (relayRetriedForVideoId != videoId) {
+                    relayRetriedForVideoId = videoId
+                    retryRelayResolve(track, videoId)
+                } else {
+                    _playbackError.value = "Yeh gaana stream nahi ho paya - relay se connect nahi ho saka."
+                    registerPlaybackFailureAndMaybeStop()
+                }
             }
         }
-    }
-
-    // SECONDARY/fallback path - purana silent-audio-trick + WebView IFrame,
-    // ab sirf tab chalta hai jab relay resolve fail ho jaye (ya baad me error de).
-    private fun playYoutubeViaWebViewFallback(track: Track) {
-        isRelayAudio = false
-        val videoId = track.youtubeVideoId
-        if (videoId == null) {
-            registerPlaybackFailureAndMaybeStop()
-            return
-        }
-        loadedYoutubeVideoId = videoId
-        _isBuffering.value = true
-        _isPlaying.value = false
-
-        // Control-center ab is asli gaane ki duration/position dikhayega
-        // (silent keep-alive clip ki nahi) - onYoutubeTimeUpdate() isko
-        // asli WebView playback ke saath aage badhata rahega.
-        PlaybackBridge.virtualModeActive = true
-        PlaybackBridge.virtualPositionMs = 0L
-        PlaybackBridge.virtualDurationMs = track.durationMs
-        PlaybackBridge.virtualIsBuffering = true
-
-        // --- BACKGROUND SILENT AUDIO TRICK ---
-        runOnController { controller ->
-            val metadata = MediaMetadata.Builder()
-                .setTitle(track.title)
-                .setArtist(track.artist ?: "YouTube Stream")
-                .build()
-
-            val packageName = context.packageName
-            val silentAudioUri = "android.resource://$packageName/raw/silent_audio"
-
-            val fastMediaItem = MediaItem.Builder()
-                .setUri(silentAudioUri)
-                .setMediaId("yt_${track.id}")
-                .setMediaMetadata(metadata)
-                .build()
-
-            // FIX: silent_audio.mp3 sirf kuch second ka hai aur pehle loop set nahi tha,
-            // isliye kuch second baad hi yeh track khatam (STATE_ENDED) ho jata tha.
-            // Jaise hi yeh khatam hota, MediaSession ka underlying player "ended" state me
-            // chala jata - background me notification/seek bar gayab ho jata tha aur
-            // Android service ko foreground na maan ke thodi der me WebView audio + service
-            // dono ko rok/kill kar deta tha. REPEAT_MODE_ONE lagane se yeh keep-alive track
-            // hamesha loop karta rahega jab tak asli (WebView) audio chal raha hai.
-            controller.repeatMode = Player.REPEAT_MODE_ONE
-            controller.setMediaItem(fastMediaItem)
-            controller.prepare()
-            controller.play() // Service ko active rakhne ke liye silent audio play karna zaruri hai
-        }
-
-        youtubeBridge?.loadVideo(videoId)
-        startBufferingWatchdog(videoId)
     }
 
     private fun startBufferingWatchdog(videoId: String) {
@@ -644,23 +569,11 @@ class MusicPlayer(
     }
 
     fun pause() {
-        if (_currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-            youtubeBridge?.pause()
-            _isPlaying.value = false
-            runOnController { it.pause() } // Silent audio pause karna zaroori hai
-        } else {
-            runOnController { it.pause() }
-        }
+        runOnController { it.pause() }
     }
 
     fun resume() {
-        if (_currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-            youtubeBridge?.play()
-            _isPlaying.value = true
-            runOnController { it.play() } // Silent audio wapas start karo
-        } else {
-            runOnController { it.play() }
-        }
+        runOnController { it.play() }
     }
 
     fun clearPlaybackError() {
@@ -670,10 +583,8 @@ class MusicPlayer(
     fun stop() {
         stopProgressTracker()
         runOnController { it.stop() }
-        if (!isRelayAudio) youtubeBridge?.pause()
         _isPlaying.value = false
         _playbackPosition.value = 0L
-        PlaybackBridge.virtualModeActive = false
     }
 
     fun stopAndDismiss() {
@@ -682,80 +593,9 @@ class MusicPlayer(
     }
 
     fun seekTo(position: Long) {
-        if (_currentTrack.value?.source == TrackSource.YOUTUBE && !isRelayAudio) {
-            // WebView fallback: asli seek WebView/IFrame video pe hoti hai.
-            // FIX: pehle yahan bhi silent keep-alive clip ko isi (bade) position
-            // pe seekTo() kiya jata tha - jo clip ki apni chhoti duration se
-            // bahar hota tha aur wahi flicker/instability wapas la deta jo
-            // periodic time-sync me thi. Ab bas virtual position turant update
-            // karte hain (control center turant naya position dikhaye) - real
-            // sync onYoutubeTimeUpdate() se hota rahega.
-            youtubeBridge?.seekTo(position / 1000f)
-            PlaybackBridge.virtualPositionMs = position
-        } else {
-            runOnController { it.seekTo(position) } // ITUNES/relay audio ke liye ExoPlayer hi asli player hai
-        }
+        runOnController { it.seekTo(position) }
         _playbackPosition.value = position
         if (!isApplyingRemote) onLocalSeek?.invoke(position)
-    }
-
-    fun onYoutubePlayerStateChanged(state: Int, currentTimeSec: Double, durationSec: Double, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        if (videoId != loadedYoutubeVideoId) return
-        when (state) {
-            1 -> { // PLAYING
-                _isPlaying.value = true
-                _isBuffering.value = false
-                hasReachedPlayingState = true
-                consecutivePlaybackFailures = 0
-                cancelBufferingWatchdog()
-                startProgressTracker()
-                if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
-                else onLocalPlayPause?.invoke(true, (currentTimeSec * 1000).toLong())
-            }
-            2 -> { // PAUSED
-                _isPlaying.value = false
-                _isBuffering.value = false
-                stopProgressTracker()
-                if (suppressNextPlayPauseBroadcast) suppressNextPlayPauseBroadcast = false
-                else onLocalPlayPause?.invoke(false, (currentTimeSec * 1000).toLong())
-            }
-            3 -> _isBuffering.value = true // BUFFERING
-            0 -> { cancelBufferingWatchdog(); handleTrackEnded() } // ENDED
-        }
-        if (!isRelayAudio) PlaybackBridge.virtualIsBuffering = _isBuffering.value
-        if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
-    }
-
-    fun onYoutubeTimeUpdate(currentTimeSec: Double, durationSec: Double, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        if (videoId != loadedYoutubeVideoId) return
-        val currentMs = (currentTimeSec * 1000).toLong()
-        _playbackPosition.value = currentMs
-
-        // FIX: pehle yahan silent keep-alive clip (kuch second ki) ko zabardasti
-        // asli gaane ke (bohot bada) position pe seekTo() kiya jata tha - yeh
-        // clip ki apni duration se bahar hota tha, isliye ExoPlayer baar-baar
-        // clamp/loop discontinuity trigger karta aur control-center ka seek bar
-        // flicker karke gayab ho jata (kabhi-kabhi playback hi ruk jata). Ab
-        // hum silent clip ko chhedte nahi - bas "virtual" position/duration
-        // update karte hain jo PlaybackService ka NotificationFacadePlayer
-        // control-center ko dikhata hai.
-        if (!isRelayAudio) {
-            PlaybackBridge.virtualPositionMs = currentMs
-            if (durationSec > 0) PlaybackBridge.virtualDurationMs = (durationSec * 1000).toLong()
-        }
-
-        if (durationSec > 0) _duration.value = (durationSec * 1000).toLong()
-    }
-
-    fun onYoutubePlayerError(errorCode: Int, videoId: String) {
-        if (_currentTrack.value?.source != TrackSource.YOUTUBE) return
-        if (videoId != loadedYoutubeVideoId) return
-        cancelBufferingWatchdog()
-        _isBuffering.value = false
-        _isPlaying.value = false
-        registerPlaybackFailureAndMaybeStop()
     }
 
     fun applyRemoteSongChange(song: Song) {
@@ -791,10 +631,8 @@ class MusicPlayer(
         stopProgressTracker()
         progressJob = scope.launch {
             while (true) {
-                if (_currentTrack.value?.source == TrackSource.ITUNES) {
-                    mediaController?.let {
-                        if (it.isPlaying) _playbackPosition.value = it.currentPosition.coerceAtLeast(0L)
-                    }
+                mediaController?.let {
+                    if (it.isPlaying) _playbackPosition.value = it.currentPosition.coerceAtLeast(0L)
                 }
                 delay(1000)
             }
