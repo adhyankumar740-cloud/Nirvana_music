@@ -16,8 +16,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -44,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -349,10 +352,17 @@ fun MainAppLayout(
             // Screen content - reserves space at the bottom for the mini
             // player (below) whenever something is loaded/playing, so list
             // content never sits hidden behind the tray.
+            // FIX: this reservation used to apply unconditionally, even while
+            // the keyboard was open - the tray is covered by the keyboard anyway
+            // in that state, so keeping it reserved just stacked an extra fixed
+            // 72dp on top of JamScreen's own imePadding(), pushing the whole
+            // chat noticeably further up than the keyboard alone would require.
+            // Dropping the reservation while the IME is visible fixes that.
+            val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(bottom = if (currentTrack != null) 72.dp else 0.dp)
+                    .padding(bottom = if (currentTrack != null && !imeVisible) 72.dp else 0.dp)
             ) {
                 when (selectedTab) {
                     "home" -> HomeScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
