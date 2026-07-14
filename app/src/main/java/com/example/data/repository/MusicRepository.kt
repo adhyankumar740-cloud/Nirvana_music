@@ -60,7 +60,10 @@ data class Playlist(
     val id: Long,
     val name: String,
     val trackCount: Int,
-    val createdAt: Long
+    val createdAt: Long,
+    // Stable cross-device id (see PlaylistEntity.remoteId) - used by
+    // PlaylistCloudSync to back this playlist up / recognize it on restore.
+    val remoteId: String
 )
 
 /** Result of a pasted-text playlist import - lets the UI show "12/15 songs matched" instead of a silent partial import. */
@@ -510,7 +513,7 @@ class MusicRepository(
         combine(playlistDao.getAllPlaylists(), playlistDao.getTrackCounts()) { playlists, counts ->
             val countMap = counts.associate { it.playlistId to it.count }
             playlists.map { p ->
-                Playlist(id = p.id, name = p.name, trackCount = countMap[p.id] ?: 0, createdAt = p.createdAt)
+                Playlist(id = p.id, name = p.name, trackCount = countMap[p.id] ?: 0, createdAt = p.createdAt, remoteId = p.remoteId)
             }
         }
 
@@ -542,6 +545,51 @@ class MusicRepository(
 
     suspend fun isTrackInPlaylist(playlistId: Long, trackId: Long): Boolean = withContext(Dispatchers.IO) {
         playlistDao.isTrackInPlaylist(playlistId, trackId)
+    }
+
+    // ---- One-shot snapshots + restore-insert, used only by PlaylistCloudSync ----
+    // (kept separate from the live Flow-based methods above: cloud sync just
+    // needs a point-in-time read/write, not a running subscription).
+
+    /** Every local playlist right now, with its tracks already loaded - used to upload backups and to diff against the cloud on login. */
+    suspend fun getPlaylistsSnapshot(): List<Pair<Playlist, List<Track>>> = withContext(Dispatchers.IO) {
+        val entities = playlistDao.getAllPlaylistsOnce()
+        entities.map { p ->
+            val tracks = playlistDao.getTracksForPlaylistOnce(p.id).map { it.toTrack() }
+            Playlist(id = p.id, name = p.name, trackCount = tracks.size, createdAt = p.createdAt, remoteId = p.remoteId) to tracks
+        }
+    }
+
+    /** True if a playlist with this [remoteId] already exists locally (used to skip re-importing something already restored/created on this device). */
+    suspend fun hasPlaylistWithRemoteId(remoteId: String): Boolean = withContext(Dispatchers.IO) {
+        playlistDao.getPlaylistByRemoteId(remoteId) != null
+    }
+
+    /** The stable cloud [PlaylistEntity.remoteId] for a given local playlist id - used to key cloud-sync calls. */
+    suspend fun getRemoteId(playlistId: Long): String? = withContext(Dispatchers.IO) {
+        playlistDao.getPlaylistById(playlistId)?.remoteId
+    }
+
+    /**
+     * Inserts a playlist coming FROM the cloud (during restore), preserving its
+     * original [remoteId] and [createdAt] so it doesn't look like a
+     * brand-new/duplicate playlist and re-upload itself right back to the
+     * cloud on the next sync pass.
+     */
+    suspend fun restorePlaylistFromCloud(
+        remoteId: String,
+        name: String,
+        createdAt: Long,
+        tracks: List<Track>
+    ): Long = withContext(Dispatchers.IO) {
+        val existing = playlistDao.getPlaylistByRemoteId(remoteId)
+        val playlistId = existing?.id ?: playlistDao.insertPlaylist(
+            PlaylistEntity(name = name, createdAt = createdAt, remoteId = remoteId)
+        )
+        tracks.forEach { track ->
+            playlistDao.insertPlaylistTrack(PlaylistTrackEntity.fromTrack(playlistId, track))
+        }
+        playlistId
     }
 
     /**
