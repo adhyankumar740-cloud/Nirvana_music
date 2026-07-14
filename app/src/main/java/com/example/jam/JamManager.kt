@@ -132,7 +132,10 @@ class JamManager {
     private var myUid: String? = null
 
     // Callbacks the ViewModel wires up to actually control local playback / UI
-    var onRemoteSongChange: ((Song) -> Unit)? = null
+    // NOTE: carries positionMs/isPlaying/updatedAtServerMs alongside the Song so
+    // MusicPlayer.applyRemoteSongChange() can seek to where the room actually is
+    // instead of always starting the new track at 0:00 (see resolveAndApplyCatchUp).
+    var onRemoteSongChange: ((song: Song, positionMs: Long, isPlaying: Boolean, updatedAtServerMs: Long) -> Unit)? = null
     var onRemotePlayPause: ((isPlaying: Boolean, positionMs: Long) -> Unit)? = null
     var onRemoteSeek: ((positionMs: Long) -> Unit)? = null
     var onParticipantsChanged: ((List<JamParticipant>) -> Unit)? = null
@@ -331,6 +334,25 @@ class JamManager {
                     val senderUid = snapshot.child("senderUid").getValue(String::class.java)
                     val isEcho = senderUid != null && senderUid == myUid
 
+                    // Read play/pause + position up front - both the song-change path
+                    // below and the play/pause/seek path further down need them, now
+                    // that onRemoteSongChange also carries the room's current playback
+                    // position/state (so the receiving device can catch up to where the
+                    // room actually is instead of starting the new track at 0:00).
+                    val isPlaying = snapshot.child("isPlaying").getValue(Boolean::class.java) ?: false
+                    val positionMs = snapshot.child("positionMs").getValue(Long::class.java) ?: 0L
+                    // updatedAt is now the Firebase SERVER's clock (ServerValue.TIMESTAMP),
+                    // not the writer's device clock, so this compensation is only ever
+                    // off by the reader's own clock drift - not the writer's too.
+                    val updatedAt = snapshot.child("updatedAt").getValue(Long::class.java) ?: System.currentTimeMillis()
+
+                    // Account for network delay: if it's playing, add elapsed time since the update.
+                    val adjustedPosition = if (isPlaying) {
+                        positionMs + (System.currentTimeMillis() - updatedAt).coerceAtLeast(0L)
+                    } else {
+                        positionMs
+                    }
+
                     // Current song - all fields land together atomically, so this is
                     // always internally consistent (no more "isPlaying updated but
                     // positionMs still stale" in-between states).
@@ -339,6 +361,7 @@ class JamManager {
                     if (songId != null && songId != lastSongId) {
                         lastSongId = songId
                         songJustChanged = true
+                        lastIsPlaying = isPlaying
                         if (!isEcho) {
                             val songState = JamSongState(
                                 songId = songId,
@@ -351,7 +374,10 @@ class JamManager {
                                 artwork = snapshot.child("artwork").getValue(String::class.java) ?: "",
                                 youtubeVideoId = snapshot.child("youtubeVideoId").getValue(String::class.java)
                             )
-                            onRemoteSongChange?.invoke(songState.toSong())
+                            // Pass the raw positionMs/updatedAt (not adjustedPosition) -
+                            // MusicPlayer.applyRemoteSongChange does its own elapsed-time
+                            // catch-up once its relay resolve actually finishes.
+                            onRemoteSongChange?.invoke(songState.toSong(), positionMs, isPlaying, updatedAt)
                         }
                         // isEcho == true -> yeh humara apna hi pushSongChange wapas aaya
                         // hai (koi doosra device nahi). MusicPlayer isse already play kar
@@ -372,21 +398,6 @@ class JamManager {
                     // applyRemoteSongChange -> play(), so skip this entirely when one
                     // just happened in this same snapshot.
                     if (songJustChanged) return
-
-                    // Play/pause + position
-                    val isPlaying = snapshot.child("isPlaying").getValue(Boolean::class.java) ?: false
-                    val positionMs = snapshot.child("positionMs").getValue(Long::class.java) ?: 0L
-                    // updatedAt is now the Firebase SERVER's clock (ServerValue.TIMESTAMP),
-                    // not the writer's device clock, so this compensation is only ever
-                    // off by the reader's own clock drift - not the writer's too.
-                    val updatedAt = snapshot.child("updatedAt").getValue(Long::class.java) ?: System.currentTimeMillis()
-
-                    // Account for network delay: if it's playing, add elapsed time since the update.
-                    val adjustedPosition = if (isPlaying) {
-                        positionMs + (System.currentTimeMillis() - updatedAt).coerceAtLeast(0L)
-                    } else {
-                        positionMs
-                    }
 
                     if (isPlaying != lastIsPlaying) {
                         lastIsPlaying = isPlaying
