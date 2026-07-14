@@ -43,9 +43,16 @@ class MusicPlayer(
     var onLocalSongChange: ((Track) -> Unit)? = null
     var onLocalPlayPause: ((isPlaying: Boolean, positionMs: Long) -> Unit)? = null
     var onLocalSeek: ((positionMs: Long) -> Unit)? = null
+    // JAM FIX: stop()/stopAndDismiss() never went through onIsPlayingChanged (they set
+    // _isPlaying.value = false directly), so closing a song on one device never
+    // reached Firebase at all - the other device just kept playing/paused as-is with
+    // no idea anything happened. onLocalStop lets JamViewModel broadcast that as a
+    // pause so every other device in the room reflects the close too.
+    var onLocalStop: ((positionMs: Long) -> Unit)? = null
 
     private var isApplyingRemote = false
     private var suppressNextPlayPauseBroadcast = false
+    private var suppressPlayPauseArmedAt = 0L
     // JAM SYNC FIX: isApplyingRemote is set true/false SYNCHRONOUSLY around play()/seekTo()
     // calls, but the MediaController is IPC-backed - the actual onIsPlayingChanged /
     // onPositionDiscontinuity callbacks (and, for song changes, the relay network
@@ -59,7 +66,18 @@ class MusicPlayer(
     // and applyRemoteSongChange now also arms suppressNextPlayPauseBroadcast so the
     // *delayed* isPlayingChanged that fires once the relay resolve finishes is caught
     // too, no matter how long that resolve takes.
+    //
+    // SAFETY-NET FIX: a "suppress the next event" flag is only safe if that next event
+    // is guaranteed to actually happen. If a remote song change never actually reaches
+    // isPlaying=true (relay stuck/failed, endless buffering), the flag stayed armed
+    // forever - so the NEXT genuinely local pause/resume from the user silently got
+    // swallowed and never reached Firebase (this is why pause sometimes stopped
+    // syncing to the other device after a buffering hiccup). Both suppress flags now
+    // carry an "armed at" timestamp and expire after suppressExpiryMs, so a stuck
+    // remote apply can only eat broadcasts for a few seconds, never indefinitely.
     private var suppressNextSeekBroadcast = false
+    private var suppressSeekArmedAt = 0L
+    private val suppressExpiryMs = 8_000L
 
     var autoplayProvider: (suspend (currentTrack: Track, excludeIds: Set<Long>, recentTracks: List<Track>) -> Track?)? = null
 
@@ -170,9 +188,10 @@ class MusicPlayer(
             _isPlaying.value = isPlayingNow
             if (isPlayingNow) startProgressTracker() else stopProgressTracker()
 
-            if (suppressNextPlayPauseBroadcast) {
-                suppressNextPlayPauseBroadcast = false
-            } else {
+            val stillArmed = suppressNextPlayPauseBroadcast &&
+                (System.currentTimeMillis() - suppressPlayPauseArmedAt) < suppressExpiryMs
+            suppressNextPlayPauseBroadcast = false
+            if (!stillArmed) {
                 onLocalPlayPause?.invoke(isPlayingNow, _playbackPosition.value)
             }
         }
@@ -203,9 +222,10 @@ class MusicPlayer(
             if (reason == Player.DISCONTINUITY_REASON_SEEK) {
                 val targetSeekMs = newPosition.positionMs
                 _playbackPosition.value = targetSeekMs
-                if (suppressNextSeekBroadcast) {
-                    suppressNextSeekBroadcast = false
-                } else if (!isApplyingRemote) {
+                val stillArmed = suppressNextSeekBroadcast &&
+                    (System.currentTimeMillis() - suppressSeekArmedAt) < suppressExpiryMs
+                suppressNextSeekBroadcast = false
+                if (!stillArmed && !isApplyingRemote) {
                     onLocalSeek?.invoke(targetSeekMs)
                 }
             }
@@ -649,6 +669,7 @@ class MusicPlayer(
         runOnController { it.stop() }
         _isPlaying.value = false
         _playbackPosition.value = 0L
+        if (!isApplyingRemote) onLocalStop?.invoke(0L)
     }
 
     fun stopAndDismiss() {
@@ -657,7 +678,10 @@ class MusicPlayer(
     }
 
     fun seekTo(position: Long) {
-        if (isApplyingRemote) suppressNextSeekBroadcast = true
+        if (isApplyingRemote) {
+            suppressNextSeekBroadcast = true
+            suppressSeekArmedAt = System.currentTimeMillis()
+        }
         runOnController { it.seekTo(position) }
         _playbackPosition.value = position
         if (!isApplyingRemote) onLocalSeek?.invoke(position)
@@ -666,6 +690,7 @@ class MusicPlayer(
     fun applyRemoteSongChange(song: Song) {
         isApplyingRemote = true
         suppressNextPlayPauseBroadcast = true
+        suppressPlayPauseArmedAt = System.currentTimeMillis()
         try {
             play(TrackSongBridge.toTrack(song))
         } finally {
@@ -676,6 +701,7 @@ class MusicPlayer(
     fun applyRemotePlayPause(isPlaying: Boolean, positionMs: Long) {
         isApplyingRemote = true
         suppressNextPlayPauseBroadcast = true
+        suppressPlayPauseArmedAt = System.currentTimeMillis()
         try {
             seekTo(positionMs)
             if (isPlaying) resume() else pause()
