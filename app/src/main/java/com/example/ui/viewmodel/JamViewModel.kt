@@ -69,6 +69,14 @@ class JamViewModel(
         musicPlayer.onLocalSeek = { positionMs ->
             if (jamManager.roomCode != null) jamManager.pushSeek(positionMs)
         }
+        // Closing/stopping a song locally didn't broadcast anything before - the
+        // other device(s) just kept playing/paused with no idea. Treat "closed" as
+        // "paused at 0" for the rest of the room; there's no room for a real
+        // "no song" state without changing JamSongState, and pausing everyone is the
+        // sensible behavior when one person stops what's playing.
+        musicPlayer.onLocalStop = { positionMs ->
+            if (jamManager.roomCode != null) jamManager.pushPlayPause(false, positionMs)
+        }
 
         jamChatManager.onMessageAdded = { msg -> _messages.value = _messages.value + msg }
         jamChatManager.onMessageChanged = { msg ->
