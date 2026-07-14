@@ -4,13 +4,11 @@ import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionResult
-import com.example.BuildConfig
 
 class PlaybackService : MediaSessionService() {
 
@@ -77,18 +75,19 @@ class PlaybackService : MediaSessionService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        // Relay ka /audio/{filename} endpoint bhi X-Relay-Key maangta hai, aur
-        // ExoPlayer seedha (app backend se hoke nahi) us URL ko hit karta hai -
-        // isliye header yahan ExoPlayer ke HTTP data source pe default request
-        // property ke roop me lagana zaroori hai.
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory().apply {
-            if (BuildConfig.RELAY_API_KEY.isNotBlank()) {
-                setDefaultRequestProperties(mapOf("X-Relay-Key" to BuildConfig.RELAY_API_KEY))
-            }
-        }
+        // FIX: pehle ExoPlayer seedha raw HTTP data source se stream karta tha,
+        // isliye har naye track pe (chahe MusicPlayer ne background me URL
+        // resolve bhi kar liya ho) audio bytes fresh network se hi aate the -
+        // yani buffering baar baar hoti thi. Ab ExoPlayer ISI shared disk cache
+        // (PlaybackCache) se hoke play karta hai jisme MusicPlayer.preloadNextTrack()
+        // agle gaane ke chunks pehle se utaar chuka hota hai - agar wo chunk
+        // already cache me hai to ExoPlayer network wait kiye bina seedha disk
+        // se serve kar deta hai, cache miss hone par hi normal network fetch
+        // hoti hai (aur wo bhi cache me save ho jaata hai agli baar ke liye).
+        val cacheDataSourceFactory = PlaybackCache.cacheDataSourceFactory(this)
 
         player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(httpDataSourceFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory))
             // FIX: ExoPlayer ab hamesha asli, audible track bajata hai (relay-
             // resolved YouTube audio ya iTunes preview) - purane silent
             // keep-alive setup ke ulat, isko ab audio focus properly handle
