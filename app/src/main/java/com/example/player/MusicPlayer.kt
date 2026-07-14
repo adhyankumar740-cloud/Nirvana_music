@@ -240,14 +240,35 @@ class MusicPlayer(
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlayingNow: Boolean) {
+            // Only updates local UI state (buffering spinner, progress ticker) now -
+            // see onPlayWhenReadyChanged() below for the Jam broadcast, which is the
+            // signal that actually reflects a genuine play/pause action.
             _isPlaying.value = isPlayingNow
             if (isPlayingNow) startProgressTracker() else stopProgressTracker()
+        }
 
+        // JAM LOOP FIX: isPlaying (above) also flips to false the instant ExoPlayer
+        // enters STATE_BUFFERING - even though playWhenReady never changed and
+        // nobody actually paused anything - and flips back to true the moment
+        // buffering clears. Broadcasting from onIsPlayingChanged (the old code)
+        // meant every transient stall got sent to Firebase as a real pause, then a
+        // real resume, right after. This bit hardest exactly on a seek into a chunk
+        // that wasn't downloaded/cached yet (locally OR on the other device after
+        // a remote seek was applied): both sides would buffer, both would
+        // broadcast a spurious pause, the other side would dutifully pause in
+        // response, buffering would clear on both, both would broadcast "resume" -
+        // and if the network was still shaky at that position, straight into
+        // another stall - a pause/resume cycle that kept both devices stuck right
+        // there. playWhenReady only actually changes on a real play()/pause() call
+        // (ours or a remote one we applied) or a forced system pause (e.g. audio
+        // focus loss) - never on a buffering stall - so it's the correct signal to
+        // broadcast on instead.
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             val stillArmed = suppressNextPlayPauseBroadcast &&
                 (System.currentTimeMillis() - suppressPlayPauseArmedAt) < suppressExpiryMs
             suppressNextPlayPauseBroadcast = false
             if (!stillArmed) {
-                onLocalPlayPause?.invoke(isPlayingNow, _playbackPosition.value)
+                onLocalPlayPause?.invoke(playWhenReady, _playbackPosition.value)
             }
         }
 
