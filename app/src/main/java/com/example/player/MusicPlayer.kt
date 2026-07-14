@@ -3,6 +3,7 @@ package com.example.player
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.PowerManager
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -214,6 +215,51 @@ class MusicPlayer(
     private var progressJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Main + Job())
 
+    // TRACK-TRANSITION WAKE-LOCK FIX (root cause of "song ends while minimized,
+    // next song only plays after reopening the app"): ExoPlayer's own
+    // setWakeMode(WAKE_MODE_NETWORK) wake lock in PlaybackService is tied to
+    // ExoPlayer's OWN playing state - it's only held while playWhenReady/
+    // isPlaying is true. The exact moment a track finishes (STATE_ENDED),
+    // ExoPlayer is idle/ended, so that wake lock is already released - right
+    // when it's needed most, because advancing to the next track needs a
+    // network round trip (relay /resolve, or the autoplay recommendation
+    // lookup) before playback can resume. If the screen is off at that exact
+    // instant (the whole point of background playback), the CPU can suspend
+    // or Doze can freeze background network access immediately, stalling that
+    // resolve call mid-flight - the track then just sits paused until the
+    // user reopens the app, which wakes the process back up and lets the
+    // stuck network call finally finish. This wake lock explicitly covers
+    // that gap: acquired the instant a track ends, released once the next
+    // track is actually playing again (or playback gives up). A short
+    // safety-timeout on acquire() means a stuck resolve can never hold it
+    // forever and drain the battery even if a release call is somehow missed.
+    private var transitionWakeLock: PowerManager.WakeLock? = null
+
+    private fun acquireTransitionWakeLock() {
+        if (transitionWakeLock?.isHeld == true) return
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        try {
+            transitionWakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "Nirvana:TrackTransitionWakeLock"
+            ).apply {
+                setReferenceCounted(false)
+                acquire(20_000L)
+            }
+        } catch (e: Exception) {
+            Log.w("MusicPlayer", "Could not acquire transition wake lock", e)
+        }
+    }
+
+    private fun releaseTransitionWakeLock() {
+        try {
+            transitionWakeLock?.let { if (it.isHeld) it.release() }
+        } catch (e: Exception) {
+            // already released (e.g. by its own timeout) - safe to ignore
+        }
+        transitionWakeLock = null
+    }
+
     init {
         PlaybackBridge.onNext = { skipNext() }
         PlaybackBridge.onPrevious = { skipPrevious() }
@@ -244,7 +290,15 @@ class MusicPlayer(
             // see onPlayWhenReadyChanged() below for the Jam broadcast, which is the
             // signal that actually reflects a genuine play/pause action.
             _isPlaying.value = isPlayingNow
-            if (isPlayingNow) startProgressTracker() else stopProgressTracker()
+            if (isPlayingNow) {
+                startProgressTracker()
+                // The next track (or a repeat/retry of the current one) is actually
+                // audible again now, so the gap the transition wake lock was
+                // covering is over - see acquireTransitionWakeLock() above.
+                releaseTransitionWakeLock()
+            } else {
+                stopProgressTracker()
+            }
         }
 
         // JAM LOOP FIX: isPlaying (above) also flips to false the instant ExoPlayer
@@ -501,6 +555,8 @@ class MusicPlayer(
                     // clear pata chalega ki koi similar gaana nahi mila
                     // (usually YouTube API key/quota issue ya genre match na milna).
                     _playbackError.value = "Koi agla gaana nahi mila - YouTube API key/quota check karo."
+                    // Nothing is going to start playing, so nothing more to cover.
+                    releaseTransitionWakeLock()
                 }
             } finally {
                 _isResolvingAutoplay.value = false
@@ -509,6 +565,9 @@ class MusicPlayer(
     }
 
     private fun handleTrackEnded() {
+        // Cover the network gap between "this track just ended" and "the next
+        // one is actually playing" - see acquireTransitionWakeLock() for why.
+        acquireTransitionWakeLock()
         if (!hasReachedPlayingState) {
             registerPlaybackFailureAndMaybeStop()
             return
@@ -524,6 +583,8 @@ class MusicPlayer(
             _isPlaying.value = false
             _playbackError.value = "Kai gaane play nahi ho paaye, ruk gaya - kuch aur try karein."
             Log.e("MusicPlayer", "Stopping auto-skip after $maxConsecutivePlaybackFailures playback failures in a row")
+            // Giving up entirely - nothing more will start playing, so hold no wake lock.
+            releaseTransitionWakeLock()
             return
         }
         advance(1)
@@ -770,6 +831,7 @@ class MusicPlayer(
 
     fun stop() {
         stopProgressTracker()
+        releaseTransitionWakeLock()
         runOnController { it.stop() }
         _isPlaying.value = false
         _playbackPosition.value = 0L
@@ -886,6 +948,7 @@ class MusicPlayer(
 
     fun release() {
         stopProgressTracker()
+        releaseTransitionWakeLock()
         cancelBufferingWatchdog()
         preloadJob?.cancel()
         activeCacheWriter?.cancel()
