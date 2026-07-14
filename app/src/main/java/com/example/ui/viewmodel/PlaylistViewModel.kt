@@ -100,6 +100,20 @@ class PlaylistViewModel(
     }
 
     /**
+     * Starts playback of the whole playlist in shuffled order: turns the
+     * player's global shuffle mode on (so Next/Previous keep shuffling
+     * afterwards too, same as everywhere else in the app) and picks a random
+     * starting track rather than always track 0.
+     */
+    fun shufflePlayPlaylist(tracks: List<Track>) {
+        if (tracks.isEmpty()) return
+        if (!musicPlayer.isShuffleEnabled.value) {
+            musicPlayer.toggleShuffle()
+        }
+        musicPlayer.setQueue(tracks, tracks.indices.random())
+    }
+
+    /**
      * Imports a playlist from pasted text (one song per line: "Title - Artist"
      * works best). Each line is resolved against the iTunes catalog; lines
      * that don't match anything are reported in the result rather than
