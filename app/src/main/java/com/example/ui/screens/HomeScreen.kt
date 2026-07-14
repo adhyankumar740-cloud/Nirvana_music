@@ -64,6 +64,21 @@ import com.example.data.model.Track
 import com.example.ui.viewmodel.AuthViewModel
 import com.example.ui.viewmodel.MusicViewModel
 import com.example.ui.viewmodel.PlaylistViewModel
+import java.util.Calendar
+
+// BUG FIX: this was a hardcoded "Good Evening," string, so the header always
+// showed evening greeting no matter what time it actually was. Using
+// java.util.Calendar (not java.time.LocalTime) since minSdk 24 has no core
+// library desugaring enabled, so java.time isn't safely available.
+private fun currentGreeting(): String {
+    val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+    return when (hour) {
+        in 5..11 -> "Good Morning,"
+        in 12..16 -> "Good Afternoon,"
+        in 17..20 -> "Good Evening,"
+        else -> "Good Night,"
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,6 +97,7 @@ fun HomeScreen(
 
     var selectedCategory by remember { mutableStateOf("Chill") }
     var trackPendingPlaylistAdd by remember { mutableStateOf<Track?>(null) }
+    val greeting = remember { currentGreeting() }
 
     val categories = listOf("Chill", "Pop", "Lo-Fi", "Electronic", "Alternative")
 
@@ -104,7 +120,7 @@ fun HomeScreen(
             ) {
                 Column {
                     Text(
-                        text = "Good Evening,",
+                        text = greeting,
                         color = Color.Gray,
                         fontSize = 14.sp
                     )
