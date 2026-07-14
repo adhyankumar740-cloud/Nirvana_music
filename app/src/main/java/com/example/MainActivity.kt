@@ -2,9 +2,13 @@ package com.example
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -131,19 +135,43 @@ class MainActivity : ComponentActivity() {
         prefs.edit().putBoolean("notification_prompt_shown", true).apply()
     }
 
-    // Battery-optimization exemption prompt removed - in practice almost no
-    // user granted this dialog (it looked like a scary/unnecessary permission
-    // right on install), so we stopped asking for it entirely. The foreground
-    // media-playback service still keeps audio going in the background on
-    // stock Android; only some aggressive OEM ROMs (MIUI/Xiaomi, Vivo, Oppo,
-    // etc.) may kill it a bit more eagerly without this exemption - that's the
-    // accepted tradeoff for not showing this prompt at all.
+    // RESTORED: this prompt was previously removed because it "looked scary"
+    // right on install - but that's exactly what was causing playback/autoplay
+    // to die the instant the app was minimized. Without this exemption,
+    // aggressive OEM battery managers (MIUI/Xiaomi, Vivo, Oppo, OnePlus,
+    // Realme etc. - extremely common) freeze or kill the background
+    // foreground-service within seconds of the app leaving the foreground,
+    // REGARDLESS of the WAKE_LOCK / foregroundServiceType=mediaPlayback setup
+    // in PlaybackService - stock-Android-only fixes (wake lock, foreground
+    // service) can't do anything about an OEM deciding to freeze the process.
+    // Same one-time "ask once, never nag again" pattern as the notification
+    // permission above - user can still manage it later from app settings.
+    private fun maybeRequestIgnoreBatteryOptimizations() {
+        val prefs = getSharedPreferences("battery_opt_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("battery_opt_prompt_shown", false)) return
+        prefs.edit().putBoolean("battery_opt_prompt_shown", true).apply()
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
+
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            // Some OEMs block/replace this intent entirely - no crash-worthy
+            // fallback exists here, user can still do it manually from
+            // Settings > Apps > Nirvana > Battery.
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         maybeRequestNotificationPermission()
+        maybeRequestIgnoreBatteryOptimizations()
 
         setContent {
             MyApplicationTheme {
