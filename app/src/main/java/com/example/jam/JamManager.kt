@@ -327,8 +327,10 @@ class JamManager {
                     // always internally consistent (no more "isPlaying updated but
                     // positionMs still stale" in-between states).
                     val songId = snapshot.child("songId").getValue(String::class.java)
+                    var songJustChanged = false
                     if (songId != null && songId != lastSongId) {
                         lastSongId = songId
+                        songJustChanged = true
                         if (!isEcho) {
                             val songState = JamSongState(
                                 songId = songId,
@@ -346,6 +348,21 @@ class JamManager {
                         // hai (koi doosra device nahi). MusicPlayer isse already play kar
                         // raha hai, dobara play() call karke restart karne ki zaroorat nahi.
                     }
+
+                    // BUG FIX: pushSongChange() doesn't touch the "isPlaying" field at
+                    // all (only song fields + positionMs=0), so right after a genuine
+                    // song change, "isPlaying" in this same snapshot is still whatever
+                    // it was BEFORE the change - usually still true. That made this
+                    // code fall into the "isPlaying && !isEcho" branch below and fire
+                    // onRemoteSeek() immediately after onRemoteSongChange(), in the same
+                    // callback - seeking a media item that was still mid-transition
+                    // (relay resolve / prepare() hadn't even finished yet). That spurious
+                    // seek is what was interfering with the new track and leaving it
+                    // stuck buffering - only in Jam, since solo playback never has this
+                    // listener at all. A fresh song change already resets position via
+                    // applyRemoteSongChange -> play(), so skip this entirely when one
+                    // just happened in this same snapshot.
+                    if (songJustChanged) return
 
                     // Play/pause + position
                     val isPlaying = snapshot.child("isPlaying").getValue(Boolean::class.java) ?: false
