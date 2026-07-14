@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
@@ -94,6 +95,7 @@ fun NowPlayingScreen(
     onNextClick: () -> Unit,
     onSeek: (Long) -> Unit,
     onFavoriteClick: () -> Unit,
+    onAddToPlaylistClick: () -> Unit,
     onShuffleClick: () -> Unit,
     onRepeatClick: () -> Unit,
     onQueueItemClick: (Int) -> Unit,
@@ -249,6 +251,9 @@ fun NowPlayingScreen(
             }
             IconButton(onClick = { activeTab = NowPlayingTab.LYRICS }) {
                 Icon(Icons.Default.Subtitles, contentDescription = "Lyrics", tint = Color.White, modifier = Modifier.size(24.dp))
+            }
+            IconButton(onClick = onAddToPlaylistClick) {
+                Icon(Icons.Default.PlaylistAdd, contentDescription = "Add to Playlist", tint = Color.White, modifier = Modifier.size(24.dp))
             }
         }
 
