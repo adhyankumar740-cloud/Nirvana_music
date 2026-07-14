@@ -53,7 +53,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.example.announcement.Announcement
 import com.example.di.AppContainer
-import com.example.player.YouTubePlayerHost
 import com.example.ui.screens.AnnouncementDialog
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.BottomPlayerTray
@@ -351,24 +350,6 @@ fun MainAppLayout(
                     "jam" -> JamScreen(jamViewModel = jamViewModel, authViewModel = authViewModel)
                     "library" -> LibraryScreen(musicViewModel = musicViewModel, authViewModel = authViewModel, playlistViewModel = playlistViewModel)
                 }
-            }
-
-            // NOTE: originally kept visibly large here whenever a YouTube full-song
-            // was playing, because YouTube's Terms of Service require the official
-            // IFrame player to stay visible (it can't be hidden/disguised) when used
-            // this way. Shrunk to a practically-invisible 1dp box at the user's
-            // explicit request, with that ToS risk understood - YouTube could revoke
-            // API access for this app if this is flagged, which would break
-            // YouTube-sourced playback entirely. The screen space it used to occupy
-            // is now filled by the persistent mini player below instead of sitting
-            // empty.
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(bottom = 12.dp, end = 12.dp)
-                    .size(1.dp)
-            ) {
-                YouTubePlayerHost(musicPlayer = musicViewModel.player, modifier = Modifier.fillMaxSize())
             }
 
             // Persistent mini player - pinned to the bottom of the screen,
