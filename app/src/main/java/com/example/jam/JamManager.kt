@@ -53,7 +53,12 @@ class JamManager {
         val source: String = "",
         val streamUrl: String = "",
         val genre: String = "",
-        val artwork: String = ""
+        val artwork: String = "",
+        // Relay/YouTube video id - the field that actually matters for real
+        // songs now (relay-only, no more direct YouTube API path). Without
+        // this making the round trip through Firebase, every other device in
+        // the room had nothing to resolve real audio from. See TrackSongBridge.
+        val youtubeVideoId: String? = null
     ) {
         fun toSong(): Song = Song(
             id = songId,
@@ -63,7 +68,8 @@ class JamManager {
             source = source,
             streamUrl = streamUrl,
             genre = genre,
-            artwork = artwork
+            artwork = artwork,
+            youtubeVideoId = youtubeVideoId
         )
 
         /** Flattened fields for a Firebase `updateChildren` call, relative to whatever
@@ -76,7 +82,8 @@ class JamManager {
             "source" to source,
             "streamUrl" to streamUrl,
             "genre" to genre,
-            "artwork" to artwork
+            "artwork" to artwork,
+            "youtubeVideoId" to youtubeVideoId
         )
 
         companion object {
@@ -88,7 +95,8 @@ class JamManager {
                 source = song.source,
                 streamUrl = song.streamUrl,
                 genre = song.genre,
-                artwork = song.artwork
+                artwork = song.artwork,
+                youtubeVideoId = song.youtubeVideoId
             )
         }
     }
@@ -340,7 +348,8 @@ class JamManager {
                                 source = snapshot.child("source").getValue(String::class.java) ?: "",
                                 streamUrl = snapshot.child("streamUrl").getValue(String::class.java) ?: "",
                                 genre = snapshot.child("genre").getValue(String::class.java) ?: "",
-                                artwork = snapshot.child("artwork").getValue(String::class.java) ?: ""
+                                artwork = snapshot.child("artwork").getValue(String::class.java) ?: "",
+                                youtubeVideoId = snapshot.child("youtubeVideoId").getValue(String::class.java)
                             )
                             onRemoteSongChange?.invoke(songState.toSong())
                         }
