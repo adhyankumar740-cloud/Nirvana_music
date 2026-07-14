@@ -38,9 +38,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -253,11 +254,24 @@ fun HomeScreen(
                             .padding(24.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = searchError ?: "No results found for \"$searchQuery\"",
-                            color = if (searchError != null) MaterialTheme.colorScheme.error else Color.Gray,
-                            textAlign = TextAlign.Center
-                        )
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = searchError ?: "No results found for \"$searchQuery\"",
+                                color = if (searchError != null) MaterialTheme.colorScheme.error else Color.Gray,
+                                textAlign = TextAlign.Center
+                            )
+                            // Only shown for a genuine failure (bad connection, quota,
+                            // etc.) - not for a search that succeeded with zero matches.
+                            // Retyping the same query normally wouldn't re-trigger a
+                            // search (it hasn't "changed"), so without this the only
+                            // way to retry was deleting a character and typing it
+                            // back in.
+                            if (searchError != null) {
+                                TextButton(onClick = { musicViewModel.retrySearch() }) {
+                                    Text("Retry")
+                                }
+                            }
+                        }
                     }
                 } else {
                     LazyColumn(
