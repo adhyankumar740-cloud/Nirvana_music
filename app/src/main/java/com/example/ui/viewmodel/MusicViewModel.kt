@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -62,13 +63,19 @@ class MusicViewModel(
     val isLoadingLyrics: StateFlow<Boolean> = _isLoadingLyrics.asStateFlow()
 
     // Observe Saved/Downloaded/Favorite Tracks from database
+    // onEach { player.prefetchTracks(it) }: warms relay resolves for these the
+    // moment each list loads (screen opened), same first-play fix as homeTracks/
+    // searchResults below - see MusicPlayer.prefetchTracks() for the full reasoning.
     val favoriteTracks: StateFlow<List<Track>> = repository.getFavoriteTracks()
+        .onEach { player.prefetchTracks(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val downloadedTracks: StateFlow<List<Track>> = repository.getDownloadedTracks()
+        .onEach { player.prefetchTracks(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val libraryTracks: StateFlow<List<Track>> = repository.getSavedTracks()
+        .onEach { player.prefetchTracks(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
@@ -142,6 +149,10 @@ class MusicViewModel(
                         is SearchOutcome.Success -> {
                             _searchResults.value = outcome.tracks
                             _searchError.value = null
+                            // First-play fix: warm the top couple of results in
+                            // the background now, well before any tap - see
+                            // MusicPlayer.prefetchTracks().
+                            player.prefetchTracks(outcome.tracks)
                         }
                         is SearchOutcome.Error -> {
                             _searchResults.value = emptyList()
@@ -163,6 +174,10 @@ class MusicViewModel(
             repository.getHomeFeaturedTracks("chill lofi").collectLatest { tracks ->
                 if (tracks.isNotEmpty()) {
                     _homeTracks.value = tracks
+                    // First-play fix: this is the very first list most sessions
+                    // ever see, so it's the single highest-value place to warm
+                    // a couple of tracks ahead of time - see MusicPlayer.prefetchTracks().
+                    player.prefetchTracks(tracks)
                 } else {
                     // Fallback mock tracks if network offline
                     _homeTracks.value = getLocalFallbackTracks()
