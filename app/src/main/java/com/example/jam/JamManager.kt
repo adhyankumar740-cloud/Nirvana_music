@@ -54,9 +54,9 @@ class JamManager {
         val streamUrl: String = "",
         val genre: String = "",
         val artwork: String = "",
-        // Relay/YouTube video id - the field that actually matters for real
-        // songs now (relay-only, no more direct YouTube API path). Without
-        // this making the round trip through Firebase, every other device in
+        // YouTube video id - the field that actually matters for real songs
+        // now (InnerTube-only, no more direct-preview path). Without this
+        // making the round trip through Firebase, every other device in
         // the room had nothing to resolve real audio from. See TrackSongBridge.
         val youtubeVideoId: String? = null
     ) {
