@@ -17,7 +17,7 @@ import com.example.data.model.Song
 import com.example.data.model.Track
 import com.example.data.model.TrackSongBridge
 import com.example.data.model.TrackSource
-import com.example.data.network.RelayResolveResponse
+import com.example.data.network.YTStreamResolution
 import com.example.data.network.InnerTubeService
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.CoroutineScope
@@ -33,7 +33,8 @@ import kotlinx.coroutines.withContext
 enum class RepeatMode { OFF, ONE, ALL }
 
 class MusicPlayer(
-    private val context: Context
+    private val context: Context,
+    private val innerTubeService: InnerTubeService
 ) {
 
     private var mediaController: MediaController? = null
@@ -54,7 +55,7 @@ class MusicPlayer(
     private var suppressPlayPauseArmedAt = 0L
     // JAM SYNC FIX: isApplyingRemote is set true/false SYNCHRONOUSLY around play()/seekTo()
     // calls, but the MediaController is IPC-backed - the actual onIsPlayingChanged /
-    // onPositionDiscontinuity callbacks (and, for song changes, the relay network
+    // onPositionDiscontinuity callbacks (and, for song changes, the stream network
     // resolve) land LATER, asynchronously, by which time isApplyingRemote has already
     // flipped back to false. That race made a remote-applied change get re-broadcast
     // as if it were a fresh local action, causing the other device to receive an echo
@@ -63,12 +64,12 @@ class MusicPlayer(
     // already solved this for applyRemotePlayPause; suppressNextSeekBroadcast does the
     // same for seeks (applyRemoteSeek and the seekTo() inside applyRemotePlayPause),
     // and applyRemoteSongChange now also arms suppressNextPlayPauseBroadcast so the
-    // *delayed* isPlayingChanged that fires once the relay resolve finishes is caught
+    // *delayed* isPlayingChanged that fires once the stream resolve finishes is caught
     // too, no matter how long that resolve takes.
     //
     // SAFETY-NET FIX: a "suppress the next event" flag is only safe if that next event
     // is guaranteed to actually happen. If a remote song change never actually reaches
-    // isPlaying=true (relay stuck/failed, endless buffering), the flag stayed armed
+    // isPlaying=true (stream stuck/failed, endless buffering), the flag stayed armed
     // forever - so the NEXT genuinely local pause/resume from the user silently got
     // swallowed and never reached Firebase (this is why pause sometimes stopped
     // syncing to the other device after a buffering hiccup). Both suppress flags now
@@ -76,7 +77,7 @@ class MusicPlayer(
     // remote apply can only eat broadcasts for a few seconds, never indefinitely.
     private var suppressNextSeekBroadcast = false
     private var suppressSeekArmedAt = 0L
-    // TUNING FIX: this was 8s, but a cold-cache relay /resolve (RelayService's own
+    // TUNING FIX: this was 8s, but a cold-cache stream /resolve (YTPlayerUtils's own
     // readTimeout is 45s, and onPlayerError even retries once more after that) can
     // legitimately take far longer than 8s. When a remote Jam song-change triggered
     // a slow resolve, the suppress flag expired WHILE we were still waiting on the
@@ -93,7 +94,7 @@ class MusicPlayer(
     // applyRemoteSongChange() and consumed once by playYoutubeTrack()/
     // playItunesTrack() right after THIS device's own resolve/buffering finishes.
     // Without this, every device just started a new track at 0:00 the instant its
-    // own (variable-length) relay resolve completed - a device whose resolve took
+    // own (variable-length) stream resolve completed - a device whose resolve took
     // even a few seconds longer than another's ended up permanently that far
     // behind, with nothing ever correcting the drift afterward.
     private data class RemoteCatchUp(val positionMs: Long, val isPlaying: Boolean, val updatedAtServerMs: Long)
@@ -181,17 +182,17 @@ class MusicPlayer(
 
     private var loadedYoutubeVideoId: String? = null
 
-    // Ek hi videoId ke liye relay resolve sirf ek baar retry hota hai
-    // (mid-playback error pe) - taaki relay baar-baar down hone par hum
+    // Ek hi videoId ke liye stream resolve sirf ek baar retry hota hai
+    // (mid-playback error pe) - taaki stream baar-baar down hone par hum
     // infinite retry loop me na phasein; ek retry ke baad bhi fail ho to
     // track ko skip/error kar dete hain.
-    private var relayRetriedForVideoId: String? = null
+    private var streamRetriedForVideoId: String? = null
 
     private var bufferingWatchdogJob: Job? = null
     private val bufferingTimeoutMs = 12_000L
 
-    // --- Next-track preloading (removes the relay-resolve wait when advancing) ---
-    // The relay's /resolve endpoint can be slow on a cold cache (it downloads/
+    // --- Next-track preloading (removes the stream-resolve wait when advancing) ---
+    // The stream's /resolve endpoint can be slow on a cold cache (it downloads/
     // converts the video from YouTube on first resolve for that videoId), which
     // is exactly the pause users saw between songs. As soon as a track starts
     // playing, we resolve the *next* track's stream URL in the background and
@@ -210,7 +211,7 @@ class MusicPlayer(
     // has to fall back to autoplayProvider (recommendations), peekNextTrack()
     // returns null on purpose (see its own comment) - so nothing was ever
     // preloaded for that transition, and triggerAutoplay() paid the FULL cost
-    // (recommendation lookup + a cold relay /resolve, which the preload
+    // (recommendation lookup + a cold stream /resolve, which the preload
     // comment above already notes can be slow) only AFTER the track had
     // already ended. For an app that's mostly played by "let it keep going"
     // rather than a long manually-built queue, that's the transition that
@@ -220,7 +221,7 @@ class MusicPlayer(
     // autoplayProvider early (while the current track is still playing) and
     // pre-resolve/pre-cache whatever it returns, exactly like a normal queued
     // next-track. triggerAutoplay() then reuses this candidate instead of
-    // hitting the provider/relay cold.
+    // hitting the provider/stream cold.
     private var autoplayPreloadJob: Job? = null
     private var pendingAutoplayTrack: Track? = null
     // Guards against staleness: only valid for a candidate computed against
@@ -246,7 +247,7 @@ class MusicPlayer(
     // isPlaying is true. The exact moment a track finishes (STATE_ENDED),
     // ExoPlayer is idle/ended, so that wake lock is already released - right
     // when it's needed most, because advancing to the next track needs a
-    // network round trip (relay /resolve, or the autoplay recommendation
+    // network round trip (stream /resolve, or the autoplay recommendation
     // lookup) before playback can resume. If the screen is off at that exact
     // instant (the whole point of background playback), the CPU can suspend
     // or Doze can freeze background network access immediately, stalling that
@@ -351,7 +352,7 @@ class MusicPlayer(
         }
 
         override fun onPlaybackStateChanged(state: Int) {
-            // ExoPlayer ab hamesha asli source hai (ITUNES preview ya relay-
+            // ExoPlayer ab hamesha asli source hai (ITUNES preview ya stream-
             // resolved YouTube audio), isliye state seedha reflect hoti hai.
             when (state) {
                 Player.STATE_BUFFERING -> _isBuffering.value = true
@@ -399,16 +400,16 @@ class MusicPlayer(
             when (track.source) {
                 TrackSource.YOUTUBE -> {
                     val videoId = track.youtubeVideoId
-                    // Ek hi videoId ke liye ek baar relay ko fresh URL ke saath
+                    // Ek hi videoId ke liye ek baar stream ko fresh URL ke saath
                     // phir try karte hain (aksar error expired/one-time signed
                     // url ki wajah se hoti hai, poore video ke unavailable hone
                     // ki wajah se nahi) - dusri baar fail hone par track skip.
-                    if (videoId != null && relayRetriedForVideoId != videoId) {
-                        relayRetriedForVideoId = videoId
-                        Log.e("MusicPlayer", "Relay audio playback error, retrying relay resolve once", error)
-                        retryRelayResolve(track, videoId, catchUp = null)
+                    if (videoId != null && streamRetriedForVideoId != videoId) {
+                        streamRetriedForVideoId = videoId
+                        Log.e("MusicPlayer", "YouTube stream playback error, retrying stream resolve once", error)
+                        retryStreamResolve(track, videoId, catchUp = null)
                     } else {
-                        Log.e("MusicPlayer", "Relay audio playback error again, giving up on this track", error)
+                        Log.e("MusicPlayer", "YouTube stream playback error again, giving up on this track", error)
                         _playbackError.value = "Yeh gaana stream nahi ho paya."
                         registerPlaybackFailureAndMaybeStop()
                     }
@@ -419,11 +420,11 @@ class MusicPlayer(
         }
     }
 
-    private fun retryRelayResolve(track: Track, videoId: String, catchUp: RemoteCatchUp?, autoPlay: Boolean = true) {
+    private fun retryStreamResolve(track: Track, videoId: String, catchUp: RemoteCatchUp?, autoPlay: Boolean = true) {
         scope.launch {
             try {
                 val response = withContext(Dispatchers.IO) {
-                    InnerTubeService.resolve(videoId = videoId)
+                    innerTubeService.resolve(videoId = videoId)
                 }
                 if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
                 runOnController { controller ->
@@ -434,7 +435,7 @@ class MusicPlayer(
 
                     val mediaItem = MediaItem.Builder()
                         .setUri(response.stream_url)
-                        .setMediaId("relay_${track.id}")
+                        .setMediaId("yt_${track.id}")
                         .setMediaMetadata(metadata)
                         .build()
 
@@ -446,9 +447,9 @@ class MusicPlayer(
                 resolveAndApplyCatchUp(catchUp, track.durationMs)
                 startProgressTracker()
             } catch (e: Exception) {
-                Log.e("MusicPlayer", "Relay retry failed for $videoId, giving up on this track", e)
+                Log.e("MusicPlayer", "Stream retry failed for $videoId, giving up on this track", e)
                 if (loadedYoutubeVideoId != videoId) return@launch
-                _playbackError.value = "Yeh gaana stream nahi ho paya - relay se connect nahi ho saka."
+                _playbackError.value = "Yeh gaana stream nahi ho paya - YouTube se connect nahi ho saka."
                 registerPlaybackFailureAndMaybeStop()
             }
         }
@@ -562,7 +563,7 @@ class MusicPlayer(
         // AUTOPLAY-GAP FIX: if preloadAutoplayCandidate() already resolved
         // (and pre-cached) a recommendation for THIS track while it was still
         // playing, use it directly - this is what actually removes the
-        // 10-15s gap, since neither the recommendation lookup nor the relay
+        // 10-15s gap, since neither the recommendation lookup nor the stream
         // resolve have to happen again down in play()/playYoutubeTrack().
         val preloadedCandidate = pendingAutoplayTrack.takeIf { pendingAutoplaySourceTrackId == current.id }
         pendingAutoplayTrack = null
@@ -662,7 +663,7 @@ class MusicPlayer(
     }
 
     // Do kaam ek ke baad ek, current track chalte-chalte background me:
-    //  1) Agle track ka relay stream URL resolve karo (jaisa pehle hota tha)
+    //  1) Agle track ka stream stream URL resolve karo (jaisa pehle hota tha)
     //  2) URL milte hi, USSI TIME uske asli audio chunks disk cache me utaarna
     //     shuru kar do (CacheWriter se) - "chunks jama karna", ExoPlayer ke
     //     asli play hone se pehle hi.
@@ -696,7 +697,7 @@ class MusicPlayer(
             try {
                 val streamUrl = preloadedStreamUrls[videoId] ?: run {
                     val response = withContext(Dispatchers.IO) {
-                        InnerTubeService.resolve(videoId = videoId)
+                        innerTubeService.resolve(videoId = videoId)
                     }
                     preloadedStreamUrls[videoId] = response.stream_url
                     response.stream_url
@@ -716,7 +717,7 @@ class MusicPlayer(
                 }
             } catch (e: Exception) {
                 // Best-effort prefetch/pre-cache only - agar yeh fail ho jaaye
-                // (relay down, cache full, ya prediction badalne se cancel ho
+                // (stream down, cache full, ya prediction badalne se cancel ho
                 // gaya) to playYoutubeTrack() apna normal resolve+play flow
                 // chalayega jaise pehle hota tha, bas ek extra buffering ke
                 // saath jo warna avoid ho jaati.
@@ -730,7 +731,7 @@ class MusicPlayer(
     // Speculative version of preloadNextTrack() for when the queue is about
     // to run out. Asks autoplayProvider EARLY (while the current track is
     // still playing, well before STATE_ENDED) so the recommendation lookup
-    // and relay resolve both happen in the background with time to spare,
+    // and stream resolve both happen in the background with time to spare,
     // instead of after the track has already finished. triggerAutoplay()
     // picks this up via pendingAutoplayTrack instead of calling the provider
     // again from scratch.
@@ -754,7 +755,7 @@ class MusicPlayer(
                 val videoId = next.youtubeVideoId ?: return@launch
                 val streamUrl = preloadedStreamUrls[videoId] ?: run {
                     val response = withContext(Dispatchers.IO) {
-                        InnerTubeService.resolve(videoId = videoId)
+                        innerTubeService.resolve(videoId = videoId)
                     }
                     preloadedStreamUrls[videoId] = response.stream_url
                     response.stream_url
@@ -773,7 +774,7 @@ class MusicPlayer(
                     cacheWriter.cache()
                 }
             } catch (e: Exception) {
-                // Best-effort only - if this fails (provider error, relay down,
+                // Best-effort only - if this fails (provider error, stream down,
                 // cancelled because the prediction changed), triggerAutoplay()
                 // just falls back to its normal cold-start flow below.
                 Log.w("MusicPlayer", "Autoplay-candidate prefetch/pre-cache failed or cancelled", e)
@@ -818,7 +819,7 @@ class MusicPlayer(
     }
 
     private fun playYoutubeTrack(track: Track, autoPlay: Boolean = true) {
-        relayRetriedForVideoId = null
+        streamRetriedForVideoId = null
         cancelBufferingWatchdog()
         _currentTrack.value = track
         if (!isApplyingRemote) onLocalSongChange?.invoke(track)
@@ -841,22 +842,22 @@ class MusicPlayer(
             return
         }
 
-        // Relay (Revo-music /resolve) se ek real audio stream url resolve
-        // karke seedha ExoPlayer se bajao. Fail hone par (relay down, timeout,
+        // InnerTube (YTPlayerUtils) se ek real audio stream url resolve
+        // karke seedha ExoPlayer se bajao. Fail hone par (stream down, timeout,
         // 401/502 etc.) playerListener.onPlayerError ek baar retry karta hai,
         // uske baad bhi fail ho to track skip/error ho jata hai.
         // FIX: if preloadNextTrack() already resolved this videoId while the
         // previous track was playing, use that cached URL immediately instead
-        // of making the caller wait on a fresh (potentially slow) relay call -
+        // of making the caller wait on a fresh (potentially slow) stream call -
         // this is what actually removes the buffering gap between tracks.
         val preloadedUrl = preloadedStreamUrls.remove(videoId)
         scope.launch {
             try {
                 val response = if (preloadedUrl != null) {
-                    RelayResolveResponse(video_id = videoId, stream_url = preloadedUrl)
+                    YTStreamResolution(video_id = videoId, stream_url = preloadedUrl)
                 } else {
                     withContext(Dispatchers.IO) {
-                        InnerTubeService.resolve(videoId = videoId)
+                        innerTubeService.resolve(videoId = videoId)
                     }
                 }
                 if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
@@ -868,7 +869,7 @@ class MusicPlayer(
 
                     val mediaItem = MediaItem.Builder()
                         .setUri(response.stream_url)
-                        .setMediaId("relay_${track.id}")
+                        .setMediaId("yt_${track.id}")
                         .setMediaMetadata(metadata)
                         .build()
 
@@ -888,13 +889,13 @@ class MusicPlayer(
                 startProgressTracker()
                 startBufferingWatchdog(videoId)
             } catch (e: Exception) {
-                Log.e("MusicPlayer", "Relay resolve failed for $videoId, retrying once", e)
+                Log.e("MusicPlayer", "Stream resolve failed for $videoId, retrying once", e)
                 if (loadedYoutubeVideoId != videoId) return@launch
-                if (relayRetriedForVideoId != videoId) {
-                    relayRetriedForVideoId = videoId
-                    retryRelayResolve(track, videoId, catchUp, autoPlay)
+                if (streamRetriedForVideoId != videoId) {
+                    streamRetriedForVideoId = videoId
+                    retryStreamResolve(track, videoId, catchUp, autoPlay)
                 } else {
-                    _playbackError.value = "Yeh gaana stream nahi ho paya - relay se connect nahi ho saka."
+                    _playbackError.value = "Yeh gaana stream nahi ho paya - YouTube se connect nahi ho saka."
                     registerPlaybackFailureAndMaybeStop()
                 }
             }
@@ -974,7 +975,7 @@ class MusicPlayer(
             suppressPlayPauseArmedAt = System.currentTimeMillis()
         }
         // SYNC-DRIFT FIX: stash the room's timing state so that once THIS device's
-        // own relay resolve/buffering finishes (which can take a few seconds longer
+        // own stream resolve/buffering finishes (which can take a few seconds longer
         // or shorter than any other device's), playYoutubeTrack()/playItunesTrack()
         // can seek forward to compensate for exactly that gap instead of always
         // starting at 0:00 - see applyCatchUpSeek().
