@@ -14,8 +14,8 @@ import com.example.data.model.Track
 import com.example.data.model.parseSyncedLyrics
 import com.example.data.model.toTrack
 import com.example.data.network.ITunesService
+import com.example.data.network.InnerTubeService
 import com.example.data.network.LrcLibService
-import com.example.data.network.RelayService
 import com.example.data.network.toTrack as relayTrackToTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -77,8 +77,7 @@ data class PlaylistImportResult(
 
 class MusicRepository(
     private val apiService: ITunesService,
-    private val relayService: RelayService,
-    private val relayApiKey: String,
+    private val innerTubeService: InnerTubeService,
     private val lrcLibService: LrcLibService,
     private val savedTrackDao: SavedTrackDao,
     private val searchHistoryDao: SearchHistoryDao,
@@ -299,7 +298,7 @@ class MusicRepository(
         }
 
         try {
-            val relayResponse = relayService.search(query = query, limit = 25, relayKey = relayApiKey.ifBlank { null })
+            val relayResponse = innerTubeService.search(query = query, limit = 25)
             val tracks = relayResponse.results.map { it.relayTrackToTrack() }
             val enriched = tracks.map { track ->
                 val localEntity = savedTrackDao.getSavedTrackById(track.id)
@@ -337,7 +336,7 @@ class MusicRepository(
             // take forever for the relay to download/convert on first resolve, which
             // looked like endless buffering client-side. Pulling more candidates and
             // filtering to a normal single-song duration avoids that.
-            val relayResponse = relayService.search(query = "$title $artist", limit = 10, relayKey = relayApiKey.ifBlank { null })
+            val relayResponse = innerTubeService.search(query = "$title $artist", limit = 10)
             val candidates = relayResponse.results.map { it.relayTrackToTrack() }
             candidates.firstOrNull { isNormalSongDuration(it) } ?: candidates.firstOrNull()
         } catch (e: Exception) {
@@ -432,7 +431,7 @@ class MusicRepository(
 
             for (query in queries) {
                 val candidateTracks: List<Track> = try {
-                    relayService.search(query = query, limit = 15, relayKey = relayApiKey.ifBlank { null })
+                    innerTubeService.search(query = query, limit = 15)
                         .results.map { it.relayTrackToTrack() }
                 } catch (e: Exception) {
                     e.printStackTrace()
