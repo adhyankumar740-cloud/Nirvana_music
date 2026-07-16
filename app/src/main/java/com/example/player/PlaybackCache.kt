@@ -28,16 +28,16 @@ object PlaybackCache {
     fun get(context: Context): SimpleCache {
         return cache ?: synchronized(this) {
             cache ?: SimpleCache(
-                File(context.applicationContext.cacheDir, "relay_audio_cache"),
+                File(context.applicationContext.cacheDir, "youtube_audio_cache"),
                 LeastRecentlyUsedCacheEvictor(MAX_CACHE_BYTES),
                 StandaloneDatabaseProvider(context.applicationContext)
             ).also { cache = it }
         }
     }
 
-    // Stream URLs now come directly from YouTube's googlevideo CDN
-    // (InnerTubeService.resolve()), which doesn't need any custom auth
-    // header - the URL itself is the credential (it's pre-signed).
+    // InnerTube stream URLs (resolved by YTPlayerUtils) are already-signed direct
+    // CDN URLs - unlike the old relay's /audio endpoint, they need no custom
+    // auth header from us, so this is just a plain HTTP data source now.
     private fun upstreamHttpDataSourceFactory(): DefaultHttpDataSource.Factory {
         return DefaultHttpDataSource.Factory()
     }
