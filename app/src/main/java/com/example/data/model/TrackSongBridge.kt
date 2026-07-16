@@ -11,10 +11,11 @@ package com.example.data.model
 object TrackSongBridge {
     // BUG FIX: this always hardcoded source = "itunes" and streamUrl =
     // track.previewUrl, no matter what the track actually was. That was fine
-    // back when every song WAS an iTunes preview - but now (relay API only,
-    // direct YouTube path removed) real songs are TrackSource.YOUTUBE with
-    // previewUrl = "" (relay tracks carry a youtubeVideoId instead, resolved
-    // to real audio per-device via RelayService). So every Jam broadcast was
+    // back when every song WAS an iTunes preview - but now (InnerTube-backed
+    // YouTube search, direct-preview path removed) real songs are
+    // TrackSource.YOUTUBE with previewUrl = "" (these tracks carry a
+    // youtubeVideoId instead, resolved to real audio per-device via
+    // InnerTubeService). So every Jam broadcast was
     // silently sending an EMPTY streamUrl + the wrong source tag. The
     // receiving device(s) then reconstructed a Track with no youtubeVideoId,
     // defaulted back to TrackSource.ITUNES, and tried to play an empty URI -
