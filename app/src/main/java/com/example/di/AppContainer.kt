@@ -28,10 +28,17 @@ class AppContainer(private val context: Context) {
         LrcLibService.create()
     }
 
+    // Talks directly to YouTube Music's own internal API, entirely on-device -
+    // no relay/render server and no YouTube Data API key needed anymore (see
+    // InnerTubeService's own doc comment).
+    val innerTubeService: InnerTubeService by lazy {
+        InnerTubeService.create(context)
+    }
+
     val musicRepository: MusicRepository by lazy {
         MusicRepository(
             apiService = apiService,
-            innerTubeService = InnerTubeService,
+            innerTubeService = innerTubeService,
             lrcLibService = lrcLibService,
             savedTrackDao = database.savedTrackDao(),
             searchHistoryDao = database.searchHistoryDao(),
@@ -69,7 +76,7 @@ class AppContainer(private val context: Context) {
     }
 
     val musicPlayer: MusicPlayer by lazy {
-        MusicPlayer(context)
+        MusicPlayer(context, innerTubeService)
     }
 
     val samplesPlayerManager: SamplesPlayerManager by lazy {
