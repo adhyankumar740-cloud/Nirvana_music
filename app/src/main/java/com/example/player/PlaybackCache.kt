@@ -6,7 +6,6 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
-import com.example.BuildConfig
 import java.io.File
 
 // Ek hi on-disk audio cache poore app ke liye:
@@ -36,15 +35,11 @@ object PlaybackCache {
         }
     }
 
-    // Relay ke /audio endpoint ko X-Relay-Key header chahiye - ExoPlayer ke
-    // liye jo header PlaybackService me lagta tha, wahi header background
-    // prefetch requests pe bhi lagana zaroori hai, warna prefetch 401 dega.
+    // Stream URLs now come directly from YouTube's googlevideo CDN
+    // (InnerTubeService.resolve()), which doesn't need any custom auth
+    // header - the URL itself is the credential (it's pre-signed).
     private fun upstreamHttpDataSourceFactory(): DefaultHttpDataSource.Factory {
-        return DefaultHttpDataSource.Factory().apply {
-            if (BuildConfig.RELAY_API_KEY.isNotBlank()) {
-                setDefaultRequestProperties(mapOf("X-Relay-Key" to BuildConfig.RELAY_API_KEY))
-            }
-        }
+        return DefaultHttpDataSource.Factory()
     }
 
     // ExoPlayer isi factory se media source banata hai - cache-through
