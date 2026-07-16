@@ -14,9 +14,9 @@ import com.example.data.model.Track
 import com.example.data.model.parseSyncedLyrics
 import com.example.data.model.toTrack
 import com.example.data.network.ITunesService
-import com.example.data.network.InnerTubeService
 import com.example.data.network.LrcLibService
-import com.example.data.network.toTrack as relayTrackToTrack
+import com.example.data.network.InnerTubeService
+import com.example.data.network.toTrack as innerTubeTrackToTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -93,11 +93,11 @@ class MusicRepository(
     // Cache for Samples feed to ensure instant load times
     private val samplesCache = mutableListOf<Track>()
 
-    // Cache of successful Home Search results, keyed by normalized query. YouTube's
-    // search.list costs 100 quota units per call out of a 10,000/day budget - so
-    // re-searching something you (or another screen) already searched for in this
-    // session (retyping, backspacing back to an earlier query, returning to the tab)
-    // would otherwise silently burn another 100 units for zero new information.
+    // Cache of successful Home Search results, keyed by normalized query. Avoids
+    // re-hitting YouTube Music's internal API for something you (or another
+    // screen) already searched for in this session (retyping, backspacing back
+    // to an earlier query, returning to the tab) - cheaper and less likely to
+    // trip rate limiting than firing the same search again for zero new info.
     private val searchResultsCache = mutableMapOf<String, List<Track>>()
 
     // YouTube's Data API has no genre field, so every YOUTUBE-sourced Track
@@ -277,8 +277,8 @@ class MusicRepository(
 
     /**
      * Home Search - goes only to the Netlify proxy's /api/search. The proxy
-     * itself is PRIMARY-relay-then-YouTube-fallback server-side, so the app
-     * only ever needs this one keyless call.
+     * itself now goes straight to YouTube Music's own internal API on-device
+     * (see InnerTubeService's own doc comment) - no server of ours in between.
      */
     fun searchTracks(query: String): Flow<SearchOutcome> = flow {
         val cacheKey = query.trim().lowercase()
@@ -298,8 +298,8 @@ class MusicRepository(
         }
 
         try {
-            val relayResponse = innerTubeService.search(query = query, limit = 25)
-            val tracks = relayResponse.results.map { it.relayTrackToTrack() }
+            val searchResponse = innerTubeService.search(query = query, limit = 25)
+            val tracks = searchResponse.results.map { it.innerTubeTrackToTrack() }
             val enriched = tracks.map { track ->
                 val localEntity = savedTrackDao.getSavedTrackById(track.id)
                 track.copy(
@@ -320,10 +320,7 @@ class MusicRepository(
      * instead of silently showing "No results found" for every failure.
      */
     private fun searchErrorMessage(e: Exception): String = when (e) {
-        is HttpException -> when (e.code()) {
-            502, 503 -> "Search unavailable: the proxy server couldn't reach the relay or YouTube. Try again shortly."
-            else -> "Search failed (server error ${e.code()}). Please try again."
-        }
+        is HttpException -> "Search failed (server error ${e.code()}). Please try again."
         is IOException -> "Search failed: check your internet connection and try again."
         else -> "Search failed. Please try again."
     }
@@ -332,12 +329,10 @@ class MusicRepository(
     suspend fun findBestYouTubeMatch(title: String, artist: String): Track? = withContext(Dispatchers.IO) {
         try {
             // limit=1 used to mean "whatever the top hit is" - including 1hr+ mixes,
-            // compilations, or full albums that share the song's title/artist. Those
-            // take forever for the relay to download/convert on first resolve, which
-            // looked like endless buffering client-side. Pulling more candidates and
-            // filtering to a normal single-song duration avoids that.
-            val relayResponse = innerTubeService.search(query = "$title $artist", limit = 10)
-            val candidates = relayResponse.results.map { it.relayTrackToTrack() }
+            // compilations, or full albums that share the song's title/artist. Pulling
+            // more candidates and filtering to a normal single-song duration avoids that.
+            val searchResponse = innerTubeService.search(query = "$title $artist", limit = 10)
+            val candidates = searchResponse.results.map { it.innerTubeTrackToTrack() }
             candidates.firstOrNull { isNormalSongDuration(it) } ?: candidates.firstOrNull()
         } catch (e: Exception) {
             e.printStackTrace()
@@ -348,7 +343,7 @@ class MusicRepository(
     /**
      * True if [track]'s duration looks like a single normal song rather than a
      * multi-hour mix/compilation/full-album upload (or a near-zero-length
-     * junk result). Used to filter relay search results for both
+     * junk result). Used to filter InnerTube search results for both
      * [findBestYouTubeMatch] and [getAutoplayRecommendation].
      */
     private fun isNormalSongDuration(track: Track): Boolean {
@@ -432,7 +427,7 @@ class MusicRepository(
             for (query in queries) {
                 val candidateTracks: List<Track> = try {
                     innerTubeService.search(query = query, limit = 15)
-                        .results.map { it.relayTrackToTrack() }
+                        .results.map { it.innerTubeTrackToTrack() }
                 } catch (e: Exception) {
                     e.printStackTrace()
                     emptyList()
