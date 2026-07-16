@@ -1,13 +1,12 @@
 package com.example.di
 
 import android.content.Context
-import com.example.BuildConfig
 import com.example.announcement.AnnouncementManager
 import com.example.data.database.MusicDatabase
 import com.example.data.local.OnboardingPreferences
 import com.example.data.network.ITunesService
+import com.example.data.network.InnerTubeService
 import com.example.data.network.LrcLibService
-import com.example.data.network.RelayService
 import com.example.data.repository.MusicRepository
 import com.example.data.sync.PlaylistCloudSync
 import com.example.jam.JamChatManager
@@ -29,17 +28,10 @@ class AppContainer(private val context: Context) {
         LrcLibService.create()
     }
 
-    // Talks directly to the relay backend - no proxy in between. The relay's
-    // own key IS embedded in the app/APK (BuildConfig.RELAY_API_KEY).
-    val relayService: RelayService by lazy {
-        RelayService.create(BuildConfig.RELAY_BASE_URL)
-    }
-
     val musicRepository: MusicRepository by lazy {
         MusicRepository(
             apiService = apiService,
-            relayService = relayService,
-            relayApiKey = BuildConfig.RELAY_API_KEY,
+            innerTubeService = InnerTubeService,
             lrcLibService = lrcLibService,
             savedTrackDao = database.savedTrackDao(),
             searchHistoryDao = database.searchHistoryDao(),
@@ -77,7 +69,7 @@ class AppContainer(private val context: Context) {
     }
 
     val musicPlayer: MusicPlayer by lazy {
-        MusicPlayer(context, relayService, BuildConfig.RELAY_API_KEY)
+        MusicPlayer(context)
     }
 
     val samplesPlayerManager: SamplesPlayerManager by lazy {
