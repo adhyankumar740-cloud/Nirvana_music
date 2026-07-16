@@ -18,7 +18,7 @@ import com.example.data.model.Track
 import com.example.data.model.TrackSongBridge
 import com.example.data.model.TrackSource
 import com.example.data.network.RelayResolveResponse
-import com.example.data.network.RelayService
+import com.example.data.network.InnerTubeService
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,9 +33,7 @@ import kotlinx.coroutines.withContext
 enum class RepeatMode { OFF, ONE, ALL }
 
 class MusicPlayer(
-    private val context: Context,
-    private val relayService: RelayService,
-    private val relayApiKey: String
+    private val context: Context
 ) {
 
     private var mediaController: MediaController? = null
@@ -200,28 +198,10 @@ class MusicPlayer(
     // cache it here, so by the time skipNext()/auto-advance actually happens,
     // the URL is usually already sitting in the cache and playback can start
     // immediately instead of waiting on a fresh network round trip.
-    // Cap raised 5 -> 8: prefetchTracks() (below) now also speculatively warms
-    // a couple of entries from whatever list is on screen (Home/Search/
-    // Library), on top of the next-in-queue/autoplay-candidate entries this
-    // map already held - 8 comfortably covers all of those at once without
-    // evicting one prediction just to make room for another.
     private val preloadedStreamUrls = object : LinkedHashMap<String, String>(8, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 8
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 5
     }
     private var preloadJob: Job? = null
-
-    // FIRST-PLAY FIX (root cause of "pehla gaana sabse zyada buffer karta
-    // hai"): everything in this preloading section only ever warms the
-    // *next* track once something is already playing - the very first track
-    // a session plays (tapped straight off a freshly-loaded Home/Search/
-    // Library list) had nothing resolved ahead of time, so it always paid
-    // the FULL cold relay round trip - the /resolve call plus the relay's
-    // own first-time YouTube download/convert for that videoId - the instant
-    // the user tapped it, with zero head start. prefetchTracks() (called by
-    // MusicViewModel the moment such a list loads, well before any tap) is
-    // keyed here by videoId so a track that's already prefetched, cached, or
-    // currently loaded is never requested twice.
-    private val prefetchJobs = mutableMapOf<String, Job>()
 
     // AUTOPLAY-GAP FIX (root cause of "song khatam hone ke baad next song
     // bajne me 10-15 sec lagta hai"): preloadNextTrack() below only pre-
@@ -443,7 +423,7 @@ class MusicPlayer(
         scope.launch {
             try {
                 val response = withContext(Dispatchers.IO) {
-                    relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                    InnerTubeService.resolve(videoId = videoId)
                 }
                 if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
                 runOnController { controller ->
@@ -681,66 +661,6 @@ class MusicPlayer(
         }
     }
 
-    /**
-     * Speculatively warms up to [limit] YouTube tracks from a list that just
-     * became visible on screen (Home feed, Search results, Library/
-     * Favorites/Downloads) - call this the moment such a list loads, well
-     * before the user has tapped anything. Resolves each track's relay
-     * stream URL and starts pulling its audio into the shared disk cache
-     * (PlaybackCache), exactly like the next-track preloading below - so if
-     * the user's first tap lands on one of these, play() finds a warm
-     * preloadedStreamUrls entry (or a fully-cached file) instead of starting
-     * the cold relay round trip from zero. This is what actually removes
-     * the "pehla gaana sabse zyada buffer karta hai" gap, since it's the one
-     * case the next-track preloader can never cover (there's no "previous
-     * track playing" to preload from before anything has played at all).
-     *
-     * Best-effort and intentionally small (default limit = 2): a background
-     * head start on whatever the user is *likely* to tap first, not a bulk
-     * downloader - so it never competes hard with the user's data plan or
-     * with whatever's actually playing right now. Tracks already prefetched,
-     * cached, or currently loaded are skipped automatically.
-     */
-    fun prefetchTracks(tracks: List<Track>, limit: Int = 2) {
-        val candidates = tracks.asSequence()
-            .filter { it.source == TrackSource.YOUTUBE }
-            .mapNotNull { it.youtubeVideoId }
-            .distinct()
-            .filter { it != loadedYoutubeVideoId }
-            .filter { !preloadedStreamUrls.containsKey(it) }
-            .filter { !prefetchJobs.containsKey(it) }
-            .take(limit)
-            .toList()
-
-        for (videoId in candidates) {
-            prefetchJobs[videoId] = scope.launch {
-                try {
-                    val response = withContext(Dispatchers.IO) {
-                        relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
-                    }
-                    preloadedStreamUrls[videoId] = response.stream_url
-                    withContext(Dispatchers.IO) {
-                        val dataSource =
-                            PlaybackCache.cacheDataSourceFactory(context).createDataSource() as CacheDataSource
-                        CacheWriter(
-                            dataSource,
-                            DataSpec(Uri.parse(response.stream_url)),
-                            /* temporaryBuffer = */ null,
-                            /* progressListener = */ null
-                        ).cache()
-                    }
-                } catch (e: Exception) {
-                    // Best-effort only - offline, relay down, or the track simply
-                    // never gets tapped. Either way, play() just falls back to
-                    // its normal resolve-on-tap flow, same as before this existed.
-                    Log.w("MusicPlayer", "Speculative prefetch failed/skipped for $videoId", e)
-                } finally {
-                    prefetchJobs.remove(videoId)
-                }
-            }
-        }
-    }
-
     // Do kaam ek ke baad ek, current track chalte-chalte background me:
     //  1) Agle track ka relay stream URL resolve karo (jaisa pehle hota tha)
     //  2) URL milte hi, USSI TIME uske asli audio chunks disk cache me utaarna
@@ -776,7 +696,7 @@ class MusicPlayer(
             try {
                 val streamUrl = preloadedStreamUrls[videoId] ?: run {
                     val response = withContext(Dispatchers.IO) {
-                        relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                        InnerTubeService.resolve(videoId = videoId)
                     }
                     preloadedStreamUrls[videoId] = response.stream_url
                     response.stream_url
@@ -834,7 +754,7 @@ class MusicPlayer(
                 val videoId = next.youtubeVideoId ?: return@launch
                 val streamUrl = preloadedStreamUrls[videoId] ?: run {
                     val response = withContext(Dispatchers.IO) {
-                        relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                        InnerTubeService.resolve(videoId = videoId)
                     }
                     preloadedStreamUrls[videoId] = response.stream_url
                     response.stream_url
@@ -936,7 +856,7 @@ class MusicPlayer(
                     RelayResolveResponse(video_id = videoId, stream_url = preloadedUrl)
                 } else {
                     withContext(Dispatchers.IO) {
-                        relayService.resolve(videoId = videoId, relayKey = relayApiKey.ifBlank { null })
+                        InnerTubeService.resolve(videoId = videoId)
                     }
                 }
                 if (loadedYoutubeVideoId != videoId) return@launch // stale, user ne dusra gaana chala diya
@@ -1136,8 +1056,6 @@ class MusicPlayer(
         pendingAutoplaySourceTrackId = null
         activeCacheWriter?.cancel()
         activeCacheWriter = null
-        prefetchJobs.values.forEach { it.cancel() }
-        prefetchJobs.clear()
         preloadedStreamUrls.clear()
         mediaController?.release()
         mediaController = null
