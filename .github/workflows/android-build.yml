@@ -89,27 +89,19 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
-      # GEMINI_API_KEY / RELAY_BASE_URL / RELAY_API_KEY: agar GitHub repo
-      # secrets set hain to .env bana denge, warna Secrets Gradle Plugin apne
-      # aap .env.example (placeholder) use kar lega, build fail nahi hogi.
-      # NOTE: app ab seedha relay backend (Render) se baat karta hai, koi
-      # Netlify proxy beech me nahi hai - isliye RELAY_API_KEY yahan se
-      # app/APK ke andar embed ho jaati hai.
+      # GEMINI_API_KEY: agar GitHub repo secret set hai to .env bana denge,
+      # warna Secrets Gradle Plugin apne aap .env.example (placeholder) use
+      # kar lega, build fail nahi hogi.
+      # NOTE: YouTube search/playback ab InnerTube (on-device) ke through
+      # hote hain - koi relay/render backend ya YouTube Data API key nahi
+      # chahiye, isliye ab yahan sirf GEMINI_API_KEY hi likha jaata hai.
       - name: Write .env from repository secrets (optional)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          RELAY_BASE_URL: ${{ secrets.RELAY_BASE_URL }}
-          RELAY_API_KEY: ${{ secrets.RELAY_API_KEY }}
         run: |
           rm -f .env
           if [ -n "$GEMINI_API_KEY" ]; then
             echo "GEMINI_API_KEY=$GEMINI_API_KEY" >> .env
-          fi
-          if [ -n "$RELAY_BASE_URL" ]; then
-            echo "RELAY_BASE_URL=$RELAY_BASE_URL" >> .env
-          fi
-          if [ -n "$RELAY_API_KEY" ]; then
-            echo "RELAY_API_KEY=$RELAY_API_KEY" >> .env
           fi
           if [ -f .env ]; then
             echo "Wrote .env from repository secrets."
