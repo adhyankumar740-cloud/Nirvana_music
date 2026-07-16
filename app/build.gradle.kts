@@ -7,6 +7,7 @@ plugins {
   alias(libs.plugins.roborazzi)
   alias(libs.plugins.secrets)
   alias(libs.plugins.google.services)
+  alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -51,6 +52,7 @@ android {
     }
   }
   compileOptions {
+    isCoreLibraryDesugaringEnabled = true
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
   }
@@ -126,6 +128,14 @@ dependencies {
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
+
+  // InnerTube (YouTube Music internal API) - replaces the old relay/render
+  // server and the YouTube Data API entirely. Runs fully on-device: no
+  // backend of ours to be "highly unstable" anymore.
+  implementation(project(":innertube"))
+  implementation(libs.timber)
+  implementation(libs.kotlinx.serialization.json)
+  coreLibraryDesugaring(libs.desugaring)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
