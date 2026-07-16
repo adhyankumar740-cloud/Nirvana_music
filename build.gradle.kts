@@ -6,4 +6,6 @@ plugins {
   alias(libs.plugins.roborazzi) apply false
   alias(libs.plugins.secrets) apply false
   alias(libs.plugins.google.services) apply false
+  // Used by the :innertube module (ported from Metrolist) for its JSON models
+  alias(libs.plugins.kotlin.serialization) apply false
 }
