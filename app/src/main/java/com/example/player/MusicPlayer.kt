@@ -230,6 +230,36 @@ class MusicPlayer(
     // reflects "what should play after the current track".
     private var pendingAutoplaySourceTrackId: Long? = null
 
+    // GAPLESS-TRANSITION FIX (root cause of "notification/media bar disappears
+    // right after a song ends, and playback fully stops after 1-2 songs while
+    // the screen is off / app is backgrounded, only resuming once the app is
+    // reopened"): ExoPlayer here only ever held ONE MediaItem at a time - the
+    // next track was swapped in only AFTER the current one hit STATE_ENDED
+    // (see PlaybackService's top comment). Media3's MediaSessionService keeps
+    // the foreground service + notification alive only while playWhenReady is
+    // true AND the player is READY/BUFFERING; the instant playback genuinely
+    // reaches STATE_ENDED with nothing else in ExoPlayer's own timeline, the
+    // system no longer sees it as "about to keep playing" and can drop the
+    // notification - and if the app is backgrounded right then, freeze/kill
+    // the service before the next track's network stream-resolve finishes.
+    // That's exactly the stall that only "wakes up" once the user reopens the
+    // app (which un-freezes the stuck network call).
+    // Fix: as soon as the next track (queued, or the speculative autoplay
+    // recommendation) has its stream URL resolved, it's added as a SECOND
+    // real MediaItem into ExoPlayer's own timeline (see preloadNextTrack() /
+    // preloadAutoplayCandidate() below) instead of only pre-caching its bytes.
+    // That lets ExoPlayer advance to it internally and gaplessly -
+    // playWhenReady/READY never drop out along the way, so the notification
+    // and foreground state survive the transition even with the screen off.
+    // onMediaItemTransition (in playerListener) catches that internal
+    // auto-advance and syncs our own queue/state to match via
+    // onAutoAdvancedTo(). If the lookahead item ISN'T ready in time, this is
+    // simply never added/never fires, and the old STATE_ENDED -> advance()
+    // path below still handles it exactly as before - this is a pure addition,
+    // not a replacement, so it degrades safely.
+    private data class QueuedLookahead(val track: Track, val isAutoplayAppend: Boolean)
+    private var queuedLookahead: QueuedLookahead? = null
+
     // Jab tak preloadJob URL resolve karke iske actual audio bytes disk cache
     // me utaar raha hota hai, uska CacheWriter yahan rakha jaata hai - taaki
     // agar is beech me prediction badal jaaye (user shuffle/skip kar de,
@@ -349,6 +379,18 @@ class MusicPlayer(
             if (!stillArmed) {
                 onLocalPlayPause?.invoke(playWhenReady, _playbackPosition.value)
             }
+        }
+
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            // Only react to the internal gapless auto-advance created by
+            // queuing a lookahead item (see queuedLookahead above) - any other
+            // transition (a fresh setMediaItem() from play(), a seek, a manual
+            // repeat) already manages its own state elsewhere and would find
+            // queuedLookahead null anyway.
+            if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) return
+            val lookahead = queuedLookahead ?: return
+            queuedLookahead = null
+            onAutoAdvancedTo(lookahead.track, lookahead.isAutoplayAppend)
         }
 
         override fun onPlaybackStateChanged(state: Int) {
@@ -610,6 +652,48 @@ class MusicPlayer(
         advance(1)
     }
 
+    // Mirrors what advance()/triggerAutoplay() normally do when moving to a
+    // new track, but WITHOUT touching ExoPlayer itself - it already switched
+    // internally and gaplessly (see the GAPLESS-TRANSITION FIX comment above
+    // queuedLookahead). This only syncs our own queue/state bookkeeping and
+    // notifies listeners (Jam sync, UI, recently-played) so everything else
+    // behaves exactly as if advance() had driven the change.
+    private fun onAutoAdvancedTo(track: Track, isAutoplayAppend: Boolean) {
+        if (isAutoplayAppend) {
+            _queue.value = _queue.value + track
+            val newIndex = _queue.value.size - 1
+            playOrder = playOrder + newIndex
+            playOrderPos = playOrder.size - 1
+            _queueIndex.value = newIndex
+        } else if (_repeatMode.value != RepeatMode.ONE) {
+            val nextPos = playOrderPos + 1
+            playOrderPos = if (nextPos in playOrder.indices) nextPos else 0
+            _queueIndex.value = playOrder.getOrElse(playOrderPos) { _queueIndex.value }
+        }
+        // Repeat-ONE: playOrderPos/_queueIndex are intentionally left as-is -
+        // it's the same track index looping, matching advance()'s own early
+        // return for RepeatMode.ONE.
+
+        streamRetriedForVideoId = null
+        loadedYoutubeVideoId = if (track.source == TrackSource.YOUTUBE) track.youtubeVideoId else null
+        _currentTrack.value = track
+        _duration.value = track.durationMs
+        _playbackPosition.value = 0L
+        hasReachedPlayingState = true
+        consecutivePlaybackFailures = 0
+        _playbackError.value = null
+        trackRecentlyPlayed(track)
+        if (!isApplyingRemote) onLocalSongChange?.invoke(track)
+
+        // The just-finished item (index 0) is now behind us - drop it from
+        // ExoPlayer's own timeline so it stays a simple "current + lookahead"
+        // window, then queue up the next lookahead.
+        runOnController { controller ->
+            if (controller.mediaItemCount > 1) controller.removeMediaItem(0)
+        }
+        preloadNextTrack()
+    }
+
     private fun registerPlaybackFailureAndMaybeStop() {
         consecutivePlaybackFailures++
         if (consecutivePlaybackFailures >= maxConsecutivePlaybackFailures) {
@@ -681,6 +765,14 @@ class MusicPlayer(
         autoplayPreloadJob?.cancel()
         pendingAutoplayTrack = null
         pendingAutoplaySourceTrackId = null
+        // The prediction may have just changed (user skipped/shuffled/toggled
+        // repeat) - drop any stale lookahead item already queued into
+        // ExoPlayer's own timeline before it gets a chance to auto-advance
+        // into it. See the GAPLESS-TRANSITION FIX comment above queuedLookahead.
+        queuedLookahead = null
+        runOnController { controller ->
+            if (controller.mediaItemCount > 1) controller.removeMediaItem(1)
+        }
 
         val next = peekNextTrack()
         if (next == null) {
@@ -701,6 +793,23 @@ class MusicPlayer(
                     }
                     preloadedStreamUrls[videoId] = response.stream_url
                     response.stream_url
+                }
+
+                // GAPLESS-TRANSITION FIX: queue it as a real second MediaItem
+                // (not just cached bytes) so ExoPlayer can advance to it on its
+                // own without ever passing through an empty STATE_ENDED gap.
+                val lookaheadMetadata = MediaMetadata.Builder()
+                    .setTitle(next.title)
+                    .setArtist(next.artist ?: "Unknown Artist")
+                    .build()
+                val lookaheadItem = MediaItem.Builder()
+                    .setUri(streamUrl)
+                    .setMediaId("yt_${next.id}")
+                    .setMediaMetadata(lookaheadMetadata)
+                    .build()
+                queuedLookahead = QueuedLookahead(next, isAutoplayAppend = false)
+                runOnController { controller ->
+                    if (controller.mediaItemCount <= 1) controller.addMediaItem(lookaheadItem)
                 }
 
                 withContext(Dispatchers.IO) {
@@ -759,6 +868,29 @@ class MusicPlayer(
                     }
                     preloadedStreamUrls[videoId] = response.stream_url
                     response.stream_url
+                }
+
+                // GAPLESS-TRANSITION FIX: same idea as preloadNextTrack() above -
+                // queue this recommendation as a real second MediaItem so, if it
+                // resolves in time, ExoPlayer can advance into it on its own
+                // without a true STATE_ENDED gap. If it ISN'T ready in time, this
+                // is simply never added, and triggerAutoplay()'s normal
+                // STATE_ENDED path (using pendingAutoplayTrack above) still
+                // handles it exactly as before.
+                if (_currentTrack.value?.id == sourceId) {
+                    val lookaheadMetadata = MediaMetadata.Builder()
+                        .setTitle(next.title)
+                        .setArtist(next.artist ?: "Unknown Artist")
+                        .build()
+                    val lookaheadItem = MediaItem.Builder()
+                        .setUri(streamUrl)
+                        .setMediaId("yt_${next.id}")
+                        .setMediaMetadata(lookaheadMetadata)
+                        .build()
+                    queuedLookahead = QueuedLookahead(next, isAutoplayAppend = true)
+                    runOnController { controller ->
+                        if (controller.mediaItemCount <= 1) controller.addMediaItem(lookaheadItem)
+                    }
                 }
 
                 withContext(Dispatchers.IO) {
@@ -1055,6 +1187,7 @@ class MusicPlayer(
         autoplayPreloadJob?.cancel()
         pendingAutoplayTrack = null
         pendingAutoplaySourceTrackId = null
+        queuedLookahead = null
         activeCacheWriter?.cancel()
         activeCacheWriter = null
         preloadedStreamUrls.clear()
